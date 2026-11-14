@@ -2,7 +2,7 @@
 
 A small writing pad for iPad. Handwrite a math answer with Apple Pencil and send it to whichever AI you are studying with, instead of typing out the notation.
 
-**Try it:** https://ivankolomietz.github.io/answer-pad/
+**Try it:** https://ivankolomietz.github.io/A-EYES/
 
 ## Why
 
@@ -22,7 +22,7 @@ When an AI tutor asks for your answer, typing fractions, exponents and integrals
 
 If you chat with your AI on a laptop, the pad can send your answer there instead.
 
-1. On the laptop, open https://ivankolomietz.github.io/answer-pad/receive.html and leave it open next to your chat. It shows an 8-character code.
+1. On the laptop, open https://ivankolomietz.github.io/A-EYES/receive.html and leave it open next to your chat. It shows an 8-character code.
 2. In Answer Pad on the iPad, tap **Laptop**, type the code, and tap **Connect**. You only do this once; the code is remembered.
 3. The Check button now says **Send**. Tap it and your answer appears on the laptop page.
 4. On the laptop, click **Copy** and press Ctrl+V in your chat.
