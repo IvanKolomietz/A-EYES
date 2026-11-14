@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Answer Pad – Receive</title>
+<link rel="icon" href="icon-180.png">
+<style>
+:root {
+  --bg: #f1f4f3; --panel: #ffffff; --fg: #18211e; --muted: #5c6a65; --line: #d3dbd7;
+  --accent: #1f6f5c; --accent-fg: #ffffff; --good: #1c7a43; --warn: #99590a; --tint: #e8f1ee;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111615; --panel: #1a2120; --fg: #e6ecea; --muted: #9aa8a3; --line: #2d3836;
+    --accent: #5fc2a8; --accent-fg: #0d1614; --good: #6fd195; --warn: #e5b25a; --tint: #1f2a28;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; display: flex; flex-direction: column; gap: 14px; }
+h1 { font-size: 20px; margin: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.label { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.code { font: 600 40px/1 ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .14em; user-select: all; }
+.pill { align-self: flex-start; font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: var(--tint); color: var(--warn); }
+.pill.good { color: var(--good); }
+.muted { color: var(--muted); font-size: 13px; margin: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button { font: 500 14px system-ui, sans-serif; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 8px 14px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.answer img { display: block; max-width: 100%; background: #fff; border: 1px solid var(--line); border-radius: 8px; cursor: grab; }
+.answer.old { opacity: .75; }
+#empty { text-align: center; color: var(--muted); padding: 26px 10px; border: 1px dashed var(--line); border-radius: 12px; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Answer Pad – Receive</h1>
+
+  <div class="card">
+    <span class="label">Pairing code</span>
+    <div class="code" id="code">······</div>
+    <span class="pill" id="state">Starting…</span>
+    <p class="muted">In Answer Pad on your iPad, tap <strong>Laptop</strong> and type this code. Keep this page open while you work.</p>
+    <div class="row"><button id="newcode">Get a new code</button></div>
+  </div>
+
+  <div id="empty">Answers you send from the iPad appear here.</div>
+  <div id="list" style="display:flex;flex-direction:column;gap:14px"></div>
+</main>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // no look-alikes such as 0/O or 1/I/L
+const KEY = 'answerpad-code', MAX_BYTES = 6 * 1024 * 1024, KEEP = 8;
+let peer = null, links = 0, baseTitle = document.title;
+
+function newCode() {
+  const a = new Uint32Array(6); crypto.getRandomValues(a);
+  return Array.from(a, n => ALPHABET[n % ALPHABET.length]).join('');
+}
+function stored() { try { return localStorage.getItem(KEY); } catch (e) { return null; } }
+function store(c) { try { localStorage.setItem(KEY, c); } catch (e) {} }
+function setState(text, good) { $('state').textContent = text; $('state').className = 'pill' + (good ? ' good' : ''); }
+
+function start(code) {
+  if (peer) peer.destroy();
+  links = 0;
+  if (!window.Peer) { setState('Could not load the connection library. Check your internet and reload.'); return; }
+  $('code').textContent = code; setState('Connecting…');
+  const p = peer = new Peer('answerpad-' + code);
+  p.on('open', () => { store(code); setState('Waiting for your iPad'); });
+  p.on('connection', conn => {
+    conn.on('open', () => { links++; setState('iPad connected', true); });
+    conn.on('close', () => { links = Math.max(0, links - 1); if (!links) setState('Waiting for your iPad'); });
+    conn.on('data', data => { if (accept(data)) conn.send({ type: 'ack' }); });
+  });
+  p.on('disconnected', () => { if (peer === p && !p.destroyed) { setState('Reconnecting…'); p.reconnect(); } });
+  p.on('error', err => {
+    if (peer !== p) return;
+    if (err.type === 'unavailable-id') setState('This code is already open in another tab. Close that tab, or get a new code.');
+    else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') setState('Connection lost. Check your internet and reload.');
+  });
+}
+
+function accept(data) {
+  if (!data || data.type !== 'answer' || !data.png) return false;
+  const bytes = data.png instanceof ArrayBuffer ? new Uint8Array(data.png) : data.png;
+  if (!(bytes instanceof Uint8Array) || bytes.length < 8 || bytes.length > MAX_BYTES) return false;
+  if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4E || bytes[3] !== 0x47) return false;   // must be a PNG
+  show(new Blob([bytes], { type: 'image/png' }));
+  return true;
+}
+
+async function copy(blob, note) {
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    note.textContent = 'Copied. Click in your chat and press Ctrl+V.';
+    return true;
+  } catch (e) { note.textContent = 'Click Copy, then press Ctrl+V in your chat.'; return false; }
+}
+
+function show(blob) {
+  $('empty').hidden = true;
+  for (const el of $('list').children) el.classList.add('old');
+  const card = document.createElement('div'); card.className = 'card answer';
+  const label = document.createElement('span'); label.className = 'label';
+  label.textContent = 'Received ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const img = document.createElement('img'); img.alt = 'Handwritten answer'; img.src = URL.createObjectURL(blob);
+  const note = document.createElement('p'); note.className = 'muted';
+  const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = 'Copy';
+  btn.onclick = () => copy(blob, note);
+  const row = document.createElement('div'); row.className = 'row'; row.append(btn);
+  card.append(label, img, row, note);
+  $('list').prepend(card);
+  while ($('list').children.length > KEEP) { const last = $('list').lastElementChild; URL.revokeObjectURL(last.querySelector('img').src); last.remove(); }
+  copy(blob, note);                                  // works when this window is the one in front
+  if (!document.hasFocus()) document.title = '● New answer – Answer Pad';
+}
+
+addEventListener('focus', () => { document.title = baseTitle; });
+$('newcode').onclick = () => start(newCode());
+start(stored() || newCode());
+</script>
+</body>
+</html>

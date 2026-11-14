@@ -58,6 +58,19 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button.on { background: var(--fg); color: var(--panel); border-color: var(--fg); }
 button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; padding: 9px 18px; }
 [hidden] { display: none !important; }
+.sheet {
+  position: absolute; z-index: 2; top: 8px; left: 8px; right: 8px; max-width: 380px; margin: 0 auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+  display: flex; flex-direction: column; gap: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+}
+.sheet p { margin: 0; font-size: 13px; color: var(--muted); }
+.sheet .url { color: var(--fg); font-weight: 600; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.sheet .row { display: flex; flex-wrap: wrap; gap: 8px; }
+.sheet input {
+  flex: 1 1 120px; min-width: 0; font: 600 20px ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+  -webkit-user-select: text; user-select: text;
+}
 @media (prefers-reduced-motion: reduce) { .status { transition: none; } }
 </style>
 </head>
@@ -69,6 +82,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   <button id="clear">Clear</button>
   <button id="finger" aria-pressed="false" title="Allow drawing with a finger">Finger</button>
   <span class="spacer"></span>
+  <button id="laptop" aria-pressed="false">Laptop</button>
   <button id="copy">Copy</button>
   <button id="check" class="primary">Check</button>
 </div>
@@ -76,8 +90,22 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   <canvas id="c"></canvas>
   <div class="hint" id="hint">Write your answer with Apple Pencil, then tap Check and pick your AI app.</div>
   <div class="status" id="status" role="status"></div>
+  <div class="sheet" id="sheet" hidden>
+    <strong>Send answers to your laptop</strong>
+    <p>On the laptop, open <span class="url" id="recvurl"></span> and type the code it shows.</p>
+    <div class="row">
+      <input id="code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="CODE" aria-label="Pairing code">
+      <button id="pair" class="primary">Connect</button>
+    </div>
+    <p id="sheetmsg"></p>
+    <div class="row">
+      <button id="unpair">Stop sending to laptop</button>
+      <button id="closesheet">Close</button>
+    </div>
+  </div>
 </div>
 
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const canvas = $('c'), ctx = canvas.getContext('2d');
@@ -132,8 +160,9 @@ let lastPen = 0;   // when the Pencil last touched the paper
 for (const type of ['touchstart', 'touchmove', 'touchend']) {
   canvas.addEventListener(type, e => e.preventDefault(), { passive: false });
 }
-document.addEventListener('touchmove', e => { if (!e.target.closest || !e.target.closest('.bar')) e.preventDefault(); }, { passive: false });
-for (const type of ['contextmenu', 'selectstart', 'dblclick']) document.addEventListener(type, e => e.preventDefault());
+const inUi = e => !!(e.target.closest && e.target.closest('.bar, .sheet'));
+document.addEventListener('touchmove', e => { if (!inUi(e)) e.preventDefault(); }, { passive: false });
+for (const type of ['contextmenu', 'selectstart', 'dblclick']) document.addEventListener(type, e => { if (!inUi(e)) e.preventDefault(); });
 
 // Ignore button presses made by a hand while the Pencil is writing or has just lifted.
 let blockTap = false;
@@ -209,8 +238,82 @@ try {
 } catch (e) {}
 
 // Check: hand the picture to the AI app the student picks in the share menu.
+// ---------- sending to a paired laptop ----------
+const CODE_KEY = 'answerpad-laptop';
+let laptopCode = null, peer = null, conn = null, ackWait = null;
+try { laptopCode = localStorage.getItem(CODE_KEY); } catch (e) {}
+
+function waitFor(setup, ms) {
+  return new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error('timeout')), ms);
+    setup(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); });
+  });
+}
+
+async function connectLaptop() {
+  if (!window.Peer) throw new Error('nolib');
+  if (conn && conn.open) return conn;
+  if (!peer || peer.destroyed) peer = new Peer();
+  else if (peer.disconnected) peer.reconnect();
+  if (!peer.open) await waitFor((ok, bad) => { peer.once('open', ok); peer.once('error', bad); }, 10000);
+  const c = peer.connect('answerpad-' + laptopCode, { reliable: true });
+  await waitFor((ok, bad) => { c.once('open', ok); c.once('error', bad); peer.once('error', bad); }, 12000);
+  c.on('data', d => { if (d && d.type === 'ack' && ackWait) { ackWait(); ackWait = null; } });
+  c.on('close', () => { if (conn === c) conn = null; });
+  conn = c;
+  return c;
+}
+
+async function sendToLaptop() {
+  say('Sending to your laptop…', 30000);
+  try {
+    const c = await connectLaptop();
+    const png = await (await snapshot()).arrayBuffer();
+    const acked = waitFor(ok => { ackWait = ok; }, 10000);
+    c.send({ type: 'answer', png });
+    await acked;
+    say('Sent to your laptop.');
+  } catch (err) {
+    conn = null; ackWait = null;
+    say('Could not reach the laptop. Is the receive page open there?', 5000);
+  }
+}
+
+function showLaptopState() {
+  $('laptop').classList.toggle('on', !!laptopCode);
+  $('laptop').setAttribute('aria-pressed', !!laptopCode);
+  $('unpair').hidden = !laptopCode;
+  $('check').textContent = laptopCode ? 'Send' : 'Check';
+}
+$('recvurl').textContent = new URL('receive.html', location.href).href.replace(/^https?:\/\//, '');
+$('laptop').onclick = () => { $('sheet').hidden = !$('sheet').hidden; if (!$('sheet').hidden) { $('code').value = laptopCode || ''; $('sheetmsg').textContent = laptopCode ? 'Paired. Send goes to your laptop.' : ''; } };
+$('closesheet').onclick = () => { $('sheet').hidden = true; };
+$('unpair').onclick = () => {
+  laptopCode = null; try { localStorage.removeItem(CODE_KEY); } catch (e) {}
+  if (conn) conn.close(); conn = null;
+  $('code').value = ''; $('sheetmsg').textContent = 'Check uses the share menu again.'; showLaptopState();
+};
+$('pair').onclick = async () => {
+  const code = $('code').value.trim().toUpperCase();
+  if (code.length !== 6) { $('sheetmsg').textContent = 'The code is 6 characters.'; return; }
+  if (conn) conn.close(); conn = null;
+  laptopCode = code; $('sheetmsg').textContent = 'Connecting…'; $('pair').disabled = true;
+  try {
+    await connectLaptop();
+    try { localStorage.setItem(CODE_KEY, code); } catch (e) {}
+    $('sheetmsg').textContent = 'Connected. Send now goes to your laptop.';
+    setTimeout(() => { $('sheet').hidden = true; }, 1200);
+  } catch (err) {
+    laptopCode = null; try { laptopCode = localStorage.getItem(CODE_KEY); } catch (e) {}
+    $('sheetmsg').textContent = !window.Peer ? 'Could not load the connection library. Check your internet.'
+      : 'Could not connect. Check the code and that the laptop page is open.';
+  } finally { $('pair').disabled = false; showLaptopState(); }
+};
+showLaptopState();
+
 $('check').onclick = async () => {
   if (!hasInk()) { say('Write something first'); return; }
+  if (laptopCode) { sendToLaptop(); return; }
   if (!canShareFiles) {
     try { await copyImage(); say('Copied. Paste it into your AI chat to check it.', 4000); }
     catch (err) { say('This browser cannot send the picture.', 4000); }
