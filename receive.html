@@ -53,48 +53,68 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   <div id="list" style="display:flex;flex-direction:column;gap:14px"></div>
 </main>
 
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // no look-alikes such as 0/O or 1/I/L
-const KEY = 'answerpad-code', MAX_BYTES = 6 * 1024 * 1024, KEEP = 8;
-let peer = null, links = 0, baseTitle = document.title;
+const KEY = 'answerpad-code', MAX_BYTES = 6 * 1024 * 1024, KEEP = 8, RELAY = 'https://ntfy.sh/';
+let source = null, run = 0, baseTitle = document.title;
+const seen = new Set();
 
 function newCode() {
-  const a = new Uint32Array(6); crypto.getRandomValues(a);
+  const a = new Uint32Array(8); crypto.getRandomValues(a);
   return Array.from(a, n => ALPHABET[n % ALPHABET.length]).join('');
 }
-function stored() { try { return localStorage.getItem(KEY); } catch (e) { return null; } }
+function stored() { try { const c = localStorage.getItem(KEY); return c && c.length === 8 ? c : null; } catch (e) { return null; } }
 function store(c) { try { localStorage.setItem(KEY, c); } catch (e) {} }
 function setState(text, good) { $('state').textContent = text; $('state').className = 'pill' + (good ? ' good' : ''); }
 
-function start(code) {
-  if (peer) peer.destroy();
-  links = 0;
-  if (!window.Peer) { setState('Could not load the connection library. Check your internet and reload.'); return; }
-  $('code').textContent = code; setState('Connecting…');
-  const p = peer = new Peer('answerpad-' + code);
-  p.on('open', () => { store(code); setState('Waiting for your iPad'); });
-  p.on('connection', conn => {
-    conn.on('open', () => { links++; setState('iPad connected', true); });
-    conn.on('close', () => { links = Math.max(0, links - 1); if (!links) setState('Waiting for your iPad'); });
-    conn.on('data', data => { if (accept(data)) conn.send({ type: 'ack' }); });
-  });
-  p.on('disconnected', () => { if (peer === p && !p.destroyed) { setState('Reconnecting…'); p.reconnect(); } });
-  p.on('error', err => {
-    if (peer !== p) return;
-    if (err.type === 'unavailable-id') setState('This code is already open in another tab. Close that tab, or get a new code.');
-    else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') setState('Connection lost. Check your internet and reload.');
-  });
+// The code is never sent anywhere. It is turned into a private channel name and an
+// encryption key, so the relay only ever carries scrambled data.
+async function deriveLink(code) {
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(code), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('answer-pad-v1'), iterations: 150000, hash: 'SHA-256' }, base, 512));
+  const topic = 'answerpad-' + Array.from(bits.slice(0, 16), b => b.toString(16).padStart(2, '0')).join('');
+  const key = await crypto.subtle.importKey('raw', bits.slice(32), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return { topic, key };
 }
 
-function accept(data) {
-  if (!data || data.type !== 'answer' || !data.png) return false;
-  const bytes = data.png instanceof ArrayBuffer ? new Uint8Array(data.png) : data.png;
-  if (!(bytes instanceof Uint8Array) || bytes.length < 8 || bytes.length > MAX_BYTES) return false;
-  if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4E || bytes[3] !== 0x47) return false;   // must be a PNG
-  show(new Blob([bytes], { type: 'image/png' }));
-  return true;
+async function start(code) {
+  const mine = ++run;
+  if (source) source.close();
+  $('code').textContent = code.slice(0, 4) + '-' + code.slice(4); setState('Connecting…');
+  const link = await deriveLink(code);
+  if (mine !== run) return;
+  store(code);
+  const reply = text => fetch(RELAY + link.topic + 'r', { method: 'POST', body: text }).catch(() => {});
+  const es = source = new EventSource(RELAY + link.topic + '/sse');
+  let paired = false;   // the relay connection drops and resumes on its own; don't forget the iPad when it does
+  const showLink = () => setState(paired ? 'iPad connected' : 'Waiting for your iPad', paired);
+  es.onopen = showLink;
+  es.onerror = () => setState('Reconnecting…');
+  es.onmessage = async e => {
+    let m; try { m = JSON.parse(e.data); } catch (err) { return; }
+    if (m.event !== 'message' || seen.has(m.id)) return;
+    seen.add(m.id);
+    if (m.attachment) {
+      const nonce = String(m.attachment.name || '').replace(/\.bin$/, '');
+      if (!/^[a-z0-9]{6,32}$/.test(nonce) || m.attachment.size > MAX_BYTES) return;
+      if (await accept(m.attachment.url, link.key)) { paired = true; showLink(); reply('got:' + nonce); }
+    } else if (/^ping:[a-z0-9]{6,32}$/.test(m.message || '')) {
+      paired = true; showLink(); reply('pong:' + m.message.slice(5));
+    }
+  };
+}
+
+async function accept(url, key) {
+  try {
+    const data = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    if (data.length < 29 || data.length > MAX_BYTES) return false;
+    const bytes = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: data.slice(0, 12) }, key, data.slice(12)));
+    if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4E || bytes[3] !== 0x47) return false;   // must be a PNG
+    show(new Blob([bytes], { type: 'image/png' }));
+    return true;
+  } catch (err) { return false; }   // not ours, or scrambled with a different code
 }
 
 async function copy(blob, note) {

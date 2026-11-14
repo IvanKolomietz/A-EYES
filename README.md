@@ -22,12 +22,12 @@ When an AI tutor asks for your answer, typing fractions, exponents and integrals
 
 If you chat with your AI on a laptop, the pad can send your answer there instead.
 
-1. On the laptop, open https://ivankolomietz.github.io/answer-pad/receive.html and leave it open next to your chat. It shows a 6-character code.
+1. On the laptop, open https://ivankolomietz.github.io/answer-pad/receive.html and leave it open next to your chat. It shows an 8-character code.
 2. In Answer Pad on the iPad, tap **Laptop**, type the code, and tap **Connect**. You only do this once; the code is remembered.
 3. The Check button now says **Send**. Tap it and your answer appears on the laptop page.
 4. On the laptop, click **Copy** and press Ctrl+V in your chat.
 
-The two devices connect directly to each other over an encrypted link, using the free [PeerJS](https://peerjs.com) service to find each other. Some school and office networks block this kind of connection.
+Answers travel through the free public relay [ntfy.sh](https://ntfy.sh) as ordinary web traffic, so this works on school and office Wi-Fi that stops devices from reaching each other directly. Each answer is encrypted on the iPad with a key made from the pairing code and decrypted on the laptop, so the relay only carries scrambled data. The relay keeps that scrambled copy for a few hours and then deletes it. The relay limits how many messages one network can send per day, so on a busy shared network a send can occasionally be refused; Copy still works when that happens.
 
 To go back to the share menu, tap **Laptop**, then **Stop sending to laptop**.
 

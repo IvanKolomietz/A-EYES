@@ -94,7 +94,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
     <strong>Send answers to your laptop</strong>
     <p>On the laptop, open <span class="url" id="recvurl"></span> and type the code it shows.</p>
     <div class="row">
-      <input id="code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="CODE" aria-label="Pairing code">
+      <input id="code" type="text" maxlength="9" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="CODE" aria-label="Pairing code">
       <button id="pair" class="primary">Connect</button>
     </div>
     <p id="sheetmsg"></p>
@@ -105,7 +105,6 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   </div>
 </div>
 
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const canvas = $('c'), ctx = canvas.getContext('2d');
@@ -239,43 +238,62 @@ try {
 
 // Check: hand the picture to the AI app the student picks in the share menu.
 // ---------- sending to a paired laptop ----------
-const CODE_KEY = 'answerpad-laptop';
-let laptopCode = null, peer = null, conn = null, ackWait = null;
+// Answers travel through a public relay (ntfy.sh) as ordinary web traffic, so this works on
+// networks that block devices from reaching each other. They are encrypted with a key made
+// from the pairing code, which never leaves the two devices.
+const CODE_KEY = 'answerpad-laptop', RELAY = 'https://ntfy.sh/';
+let laptopCode = null, link = null;
 try { laptopCode = localStorage.getItem(CODE_KEY); } catch (e) {}
+if (laptopCode && laptopCode.length !== 8) laptopCode = null;
 
-function waitFor(setup, ms) {
+async function deriveLink(code) {
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(code), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('answer-pad-v1'), iterations: 150000, hash: 'SHA-256' }, base, 512));
+  const topic = 'answerpad-' + Array.from(bits.slice(0, 16), b => b.toString(16).padStart(2, '0')).join('');
+  const key = await crypto.subtle.importKey('raw', bits.slice(32), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return { topic, key, code };
+}
+async function getLink() { if (!link || link.code !== laptopCode) link = await deriveLink(laptopCode); return link; }
+function nonce() { return Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join(''); }
+
+// Listen for the laptop's reply, publish something to it, and wait for the reply we want.
+function ask(l, publish, want, ms) {
   return new Promise((res, rej) => {
-    const t = setTimeout(() => rej(new Error('timeout')), ms);
-    setup(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); });
+    const es = new EventSource(RELAY + l.topic + 'r/sse');
+    let started = false;
+    const done = (fn, v) => { clearTimeout(t); es.close(); fn(v); };
+    const t = setTimeout(() => done(rej, new Error('noreply')), ms);
+    es.onmessage = e => { try { const m = JSON.parse(e.data); if (m.event === 'message' && m.message === want) done(res); } catch (err) {} };
+    es.onopen = () => { if (started) return; started = true; publish().catch(err => done(rej, err)); };
   });
 }
+async function post(l, body, headers) {
+  const r = await fetch(RELAY + l.topic, { method: 'PUT', body, headers });
+  if (!r.ok) throw new Error('http' + r.status);
+}
 
-async function connectLaptop() {
-  if (!window.Peer) throw new Error('nolib');
-  if (conn && conn.open) return conn;
-  if (!peer || peer.destroyed) peer = new Peer();
-  else if (peer.disconnected) peer.reconnect();
-  if (!peer.open) await waitFor((ok, bad) => { peer.once('open', ok); peer.once('error', bad); }, 10000);
-  const c = peer.connect('answerpad-' + laptopCode, { reliable: true });
-  await waitFor((ok, bad) => { c.once('open', ok); c.once('error', bad); peer.once('error', bad); }, 12000);
-  c.on('data', d => { if (d && d.type === 'ack' && ackWait) { ackWait(); ackWait = null; } });
-  c.on('close', () => { if (conn === c) conn = null; });
-  conn = c;
-  return c;
+async function pingLaptop() {
+  const l = await getLink(), n = nonce();
+  await ask(l, () => post(l, 'ping:' + n), 'pong:' + n, 8000);
 }
 
 async function sendToLaptop() {
   say('Sending to your laptop…', 30000);
+  let posted = false;
   try {
-    const c = await connectLaptop();
+    const l = await getLink();
     const png = await (await snapshot()).arrayBuffer();
-    const acked = waitFor(ok => { ackWait = ok; }, 10000);
-    c.send({ type: 'answer', png });
-    await acked;
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, l.key, png));
+    const body = new Uint8Array(12 + ct.length); body.set(iv); body.set(ct, 12);
+    const n = nonce();
+    await ask(l, async () => { await post(l, body, { Filename: n + '.bin' }); posted = true; }, 'got:' + n, 15000);
     say('Sent to your laptop.');
   } catch (err) {
-    conn = null; ackWait = null;
-    say('Could not reach the laptop. Is the receive page open there?', 5000);
+    if (posted) say('Sent, but the laptop did not confirm. Is the receive page open there?', 6000);
+    else if (String(err && err.message).includes('429')) say('The relay is busy. Try again in a minute, or use Copy.', 6000);
+    else say('Could not send. Check your internet connection.', 6000);
   }
 }
 
@@ -289,24 +307,22 @@ $('recvurl').textContent = new URL('receive.html', location.href).href.replace(/
 $('laptop').onclick = () => { $('sheet').hidden = !$('sheet').hidden; if (!$('sheet').hidden) { $('code').value = laptopCode || ''; $('sheetmsg').textContent = laptopCode ? 'Paired. Send goes to your laptop.' : ''; } };
 $('closesheet').onclick = () => { $('sheet').hidden = true; };
 $('unpair').onclick = () => {
-  laptopCode = null; try { localStorage.removeItem(CODE_KEY); } catch (e) {}
-  if (conn) conn.close(); conn = null;
+  laptopCode = null; link = null; try { localStorage.removeItem(CODE_KEY); } catch (e) {}
   $('code').value = ''; $('sheetmsg').textContent = 'Check uses the share menu again.'; showLaptopState();
 };
 $('pair').onclick = async () => {
-  const code = $('code').value.trim().toUpperCase();
-  if (code.length !== 6) { $('sheetmsg').textContent = 'The code is 6 characters.'; return; }
-  if (conn) conn.close(); conn = null;
+  const code = $('code').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length !== 8) { $('sheetmsg').textContent = 'The code is 8 characters.'; return; }
   laptopCode = code; $('sheetmsg').textContent = 'Connecting…'; $('pair').disabled = true;
   try {
-    await connectLaptop();
+    await pingLaptop();
     try { localStorage.setItem(CODE_KEY, code); } catch (e) {}
     $('sheetmsg').textContent = 'Connected. Send now goes to your laptop.';
     setTimeout(() => { $('sheet').hidden = true; }, 1200);
   } catch (err) {
     laptopCode = null; try { laptopCode = localStorage.getItem(CODE_KEY); } catch (e) {}
-    $('sheetmsg').textContent = !window.Peer ? 'Could not load the connection library. Check your internet.'
-      : 'Could not connect. Check the code and that the laptop page is open.';
+    if (laptopCode && laptopCode.length !== 8) laptopCode = null;
+    $('sheetmsg').textContent = 'Could not connect. Check the code and that the laptop page is open.';
   } finally { $('pair').disabled = false; showLaptopState(); }
 };
 showLaptopState();
