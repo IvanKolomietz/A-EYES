@@ -47,7 +47,6 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: 
   pointer-events: none; opacity: 0; transition: opacity .2s; text-align: center;
 }
 .status.show { opacity: 1; }
-.thumb { position: absolute; right: 3px; top: 0; width: 4px; border-radius: 2px; background: var(--muted); opacity: .55; pointer-events: none; }
 .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .bar .spacer { flex: 1 1 0; }
 button {
@@ -90,8 +89,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
 </div>
 <div class="pad" id="pad">
   <canvas id="c"></canvas>
-  <div class="hint" id="hint">Write your answer with Apple Pencil, then tap Check and pick your AI app. Drag with a finger to scroll down for more room.</div>
-  <div class="thumb" id="thumb" hidden></div>
+  <div class="hint" id="hint">Write your answer with Apple Pencil, then tap Check and pick your AI app. Drag with a finger to move the page for more room.</div>
   <div class="status" id="status" role="status"></div>
   <div class="sheet" id="sheet" hidden>
     <strong>Send answers to your laptop</strong>
@@ -126,9 +124,9 @@ let lasso = null;     // points of the loop being drawn
 let drag = null;      // {mode: 'move' | 'scale', start, orig, ids, box}
 let dpr = 1, W = 0, H = 0, statusTimer = null;
 const BOX_PAD = 10, HANDLE = 9, ERASE_R = 13;
-// The page is taller than the screen: strokes are stored in page positions and `scrollY`
-// says how far down the visible part starts. A finger drag scrolls (two fingers when Finger is on).
-let scrollY = 0, pan = null;
+// The page is bigger than the screen: strokes are stored in page positions, and `scrollX` and
+// `scrollY` say where the visible part starts. A finger drag moves the page (two fingers when Finger is on).
+let scrollX = 0, scrollY = 0, pan = null;
 const fingers = new Map();
 let eraserPos = null;   // where the eraser is, so its circle can be shown
 
@@ -154,7 +152,7 @@ function paint(g, list, scale, color, ox = 0, oy = 0) {
 // The loop being drawn and the dashed box with its resize dot.
 function overlay(b) {
   if (!lasso && !b) return;
-  ctx.save(); ctx.scale(dpr, dpr); ctx.translate(0, -scrollY);
+  ctx.save(); ctx.scale(dpr, dpr); ctx.translate(-scrollX, -scrollY);
   ctx.strokeStyle = ctx.fillStyle = css('--accent', '#1f6f5c'); ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
   if (lasso && lasso.length > 1) {
     ctx.beginPath(); ctx.moveTo(lasso[0].x, lasso[0].y);
@@ -170,10 +168,10 @@ function overlay(b) {
 
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  paint(ctx, strokes, dpr, inkColor(), 0, scrollY);
+  paint(ctx, strokes, dpr, inkColor(), scrollX, scrollY);
   overlay(sel && sel.box);
   if (eraserPos && tool === 'eraser') {
-    ctx.save(); ctx.scale(dpr, dpr); ctx.translate(0, -scrollY);
+    ctx.save(); ctx.scale(dpr, dpr); ctx.translate(-scrollX, -scrollY);
     ctx.beginPath(); ctx.arc(eraserPos.x, eraserPos.y, ERASE_R, 0, 7);
     ctx.globalAlpha = 0.18; ctx.fillStyle = css('--muted', '#777'); ctx.fill();
     ctx.globalAlpha = 1; ctx.lineWidth = 1.5; ctx.strokeStyle = css('--fg', '#222'); ctx.stroke();
@@ -189,7 +187,7 @@ function redraw() {
 let cache = null, framePending = false;
 function layer(list) {
   const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height;
-  paint(c.getContext('2d'), list, dpr, inkColor(), 0, scrollY);
+  paint(c.getContext('2d'), list, dpr, inkColor(), scrollX, scrollY);
   return c;
 }
 function frame() {
@@ -205,7 +203,7 @@ function drawLive() {
   if (drag) {
     const t = dragShape(), b = drag.box;
     ctx.save();
-    ctx.translate((b.x0 + t.dx) * dpr, (b.y0 - scrollY + t.dy) * dpr); ctx.scale(t.k, t.k); ctx.translate(-b.x0 * dpr, -(b.y0 - scrollY) * dpr);
+    ctx.translate((b.x0 - scrollX + t.dx) * dpr, (b.y0 - scrollY + t.dy) * dpr); ctx.scale(t.k, t.k); ctx.translate(-(b.x0 - scrollX) * dpr, -(b.y0 - scrollY) * dpr);
     ctx.drawImage(cache.fg, 0, 0);
     ctx.restore();
     box = { x0: b.x0 + t.dx, y0: b.y0 + t.dy, x1: b.x0 + t.dx + (b.x1 - b.x0) * t.k, y1: b.y0 + t.dy + (b.y1 - b.y0) * t.k };
@@ -279,23 +277,23 @@ function commitDrag() {
   remember(drag.orig);
 }
 
-// You can scroll until the lowest writing sits near the top, leaving most of a screen free below it.
-function maxScroll() {
-  let bottom = -Infinity;
-  for (const s of strokes) bottom = Math.max(bottom, (s.bb || (current && current.s === s ? boxOf([s]) : (s.bb = boxOf([s])))).y1);
-  return Math.max(0, bottom - H * 0.3);
+// The page can be moved in any direction until the writing is about to leave the screen,
+// which always leaves most of a screen of empty space on the side you are heading to.
+function scrollLimits() {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const s of strokes) {
+    const b = s.bb || (current && current.s === s ? boxOf([s]) : (s.bb = boxOf([s])));
+    x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
+  }
+  if (!strokes.length) return { x0: 0, x1: 0, y0: 0, y1: 0 };
+  return { x0: Math.min(0, x0 - W * 0.7), x1: Math.max(0, x1 - W * 0.3), y0: Math.min(0, y0 - H * 0.7), y1: Math.max(0, y1 - H * 0.3) };
 }
-function showThumb(max = maxScroll()) {
-  const t = $('thumb'), total = Math.max(max, scrollY) + H;
-  t.hidden = total <= H + 1;
-  if (!t.hidden) { t.style.height = Math.max(24, H * H / total) + 'px'; t.style.top = (scrollY / total) * H + 'px'; }
+function setScroll(x, y, lim = scrollLimits()) {
+  scrollX = Math.max(lim.x0, Math.min(lim.x1, x)); scrollY = Math.max(lim.y0, Math.min(lim.y1, y));
+  $('pad').style.backgroundPosition = -scrollX + 'px ' + -scrollY + 'px';
+  frame();
 }
-function setScroll(y, max = maxScroll()) {
-  scrollY = Math.max(0, Math.min(max, y));
-  $('pad').style.backgroundPositionY = -scrollY + 'px';
-  showThumb(max); frame();
-}
-const fingerY = () => { let t = 0; for (const y of fingers.values()) t += y; return t / fingers.size; };
+const fingerAt = () => { let x = 0, y = 0; for (const f of fingers.values()) { x += f.x; y += f.y; } return { x: x / fingers.size, y: y / fingers.size }; };
 
 function resize() {
   const r = $('pad').getBoundingClientRect();
@@ -310,7 +308,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redraw);
 
 function pt(e) {
   const r = canvas.getBoundingClientRect();
-  return { x: e.clientX - r.left, y: e.clientY - r.top + scrollY, p: e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5 };
+  return { x: e.clientX - r.left + scrollX, y: e.clientY - r.top + scrollY, p: e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5 };
 }
 let lastPen = -1e9;   // when the Pencil last touched the paper
 
@@ -330,13 +328,13 @@ $('bar').addEventListener('click', e => { if (blockTap) { e.stopPropagation(); e
 
 canvas.addEventListener('pointerdown', e => {
   if (e.pointerType === 'touch') {
-    fingers.set(e.pointerId, e.clientY);
+    fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     const penBusy = (current && !current.touch) || action || performance.now() - lastPen < 300;   // a resting palm must not scroll
-    if (pan) pan.y = fingerY();
+    if (pan) pan.at = fingerAt();
     else if (!penBusy && fingers.size >= (fingerOk ? 2 : 1)) {
       if (current) { strokes = history.pop(); current = null; redraw(); }   // a second finger landed: drop the mark the first one began
-      pan = { y: fingerY(), from: fingerY(), max: maxScroll(), moving: false };
+      pan = { at: fingerAt(), from: fingerAt(), lim: scrollLimits(), moving: false };
     }
     if (pan || !fingerOk) { e.preventDefault(); return; }   // Pencil only unless Finger is on
   } else pan = null;
@@ -368,12 +366,12 @@ canvas.addEventListener('pointerdown', e => {
 });
 canvas.addEventListener('pointermove', e => {
   if (e.pointerType === 'touch' && fingers.has(e.pointerId)) {
-    fingers.set(e.pointerId, e.clientY);
+    fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pan) {
       e.preventDefault();
-      const y = fingerY();
-      if (!pan.moving && Math.abs(y - pan.from) < 8) return;   // ignore a hand that is only resting
-      pan.moving = true; setScroll(scrollY + pan.y - y, pan.max); pan.y = y;
+      const f = fingerAt();
+      if (!pan.moving && Math.hypot(f.x - pan.from.x, f.y - pan.from.y) < 8) return;   // ignore a hand that is only resting
+      pan.moving = true; setScroll(scrollX + pan.at.x - f.x, scrollY + pan.at.y - f.y, pan.lim); pan.at = f;
       return;
     }
   }
@@ -390,7 +388,7 @@ canvas.addEventListener('pointermove', e => {
     if (drawing) {
       const pts = current.s.pts, last = pts[pts.length - 1];
       pts.push(p);
-      paint(ctx, [{ pts: [last, p], w: 1 }], dpr, inkColor(), 0, scrollY);
+      paint(ctx, [{ pts: [last, p], w: 1 }], dpr, inkColor(), scrollX, scrollY);
     } else if (action.kind === 'erase') {
       // Step along the path so a fast swipe doesn't jump over thin strokes.
       const a = action.last, n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y) / 6));
@@ -406,9 +404,9 @@ const end = e => {
   if (e.pointerType === 'pen') lastPen = performance.now();
   if (e.pointerType === 'touch') {
     fingers.delete(e.pointerId);
-    if (pan) { if (fingers.size) pan.y = fingerY(); else pan = null; return; }
+    if (pan) { if (fingers.size) pan.at = fingerAt(); else pan = null; return; }
   }
-  if (current && e.pointerId === current.id) { current = null; showThumb(); return; }
+  if (current && e.pointerId === current.id) { current = null; return; }
   if (!action || e.pointerId !== action.id) return;
   if (action.kind === 'erase') {
     if (strokes !== action.before) remember(action.before);
@@ -423,9 +421,9 @@ const end = e => {
     commitDrag();
     drag = null;
   }
-  action = null; cache = null; redraw(); showThumb();
+  action = null; cache = null; redraw();
 };
-canvas.addEventListener('wheel', e => { e.preventDefault(); if (!current && !action) setScroll(scrollY + e.deltaY); }, { passive: false });
+canvas.addEventListener('wheel', e => { e.preventDefault(); if (!current && !action) setScroll(scrollX + e.deltaX, scrollY + e.deltaY); }, { passive: false });
 canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('lostpointercapture', end);
@@ -442,7 +440,7 @@ function say(text, ms = 2600) {
 function snapshot() {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const s of strokes) if (!s.erase) for (const p of s.pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
-  const m = 28; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(W, x1 + m); y1 = y1 + m;
+  const m = 28; x0 -= m; y0 -= m; x1 += m; y1 += m;
   const w = Math.max(60, x1 - x0), h = Math.max(60, y1 - y0);
   const scale = Math.max(1, Math.min(3, 1200 / Math.max(w, h)));
   const layer = document.createElement('canvas');
@@ -595,16 +593,16 @@ $('select').onclick = () => setTool('select');
 $('finger').onclick = () => { fingerOk = !fingerOk; $('finger').classList.toggle('on', fingerOk); $('finger').setAttribute('aria-pressed', fingerOk); };
 $('undo').onclick = () => {
   if (!history.length) { say('Nothing to undo'); return; }
-  strokes = history.pop(); sel = null; lasso = null; setScroll(scrollY); redraw();
+  strokes = history.pop(); sel = null; lasso = null; setScroll(scrollX, scrollY); redraw();
 };
 $('clear').onclick = () => {
   if (!strokes.length) return;
   if (sel) {
-    remember(strokes); strokes = strokes.filter(s => !sel.ids.has(s)); sel = null; setScroll(scrollY); redraw();
+    remember(strokes); strokes = strokes.filter(s => !sel.ids.has(s)); sel = null; setScroll(scrollX, scrollY); redraw();
     say('Deleted. Undo brings it back.');
     return;
   }
-  remember(strokes); strokes = []; sel = null; lasso = null; setScroll(0); redraw();
+  remember(strokes); strokes = []; sel = null; lasso = null; setScroll(0, 0); redraw();
   say('Cleared. Undo brings it back.');
 };
 document.addEventListener('gesturestart', e => e.preventDefault());
