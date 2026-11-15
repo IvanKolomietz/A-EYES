@@ -13,7 +13,7 @@ When an AI tutor asks for your answer, typing fractions, exponents and integrals
 1. Open the link above in Safari on your iPad.
 2. Tap Share, then **Add to Home Screen**. It opens like an app from then on.
 3. Keep your notes app open and bring Answer Pad in as a Slide Over or small window.
-4. Write your answer with Apple Pencil.
+4. Write your answer with Apple Pencil. Need more room? Drag the page up with a finger to scroll down (two fingers when **Finger** is on).
 5. Tap **Check**, pick your AI app (ChatGPT, Claude, Gemini and so on) from the share menu, and send.
 
 **Copy** puts the picture on the clipboard instead, for pasting into a chat by hand.
@@ -49,7 +49,7 @@ To go back to the share menu, tap **Laptop**, then **Stop sending to laptop**.
 - It works with any AI app that accepts images. Nothing is tied to one company.
 - No account, no sign-up, no API key.
 - Your handwriting stays on your device until you tap Check, Send or Copy. The app has no server of its own and collects nothing.
-- The image is cropped to what you wrote, in dark ink on white, so it is easy for an AI to read.
+- The image covers everything you wrote, including parts scrolled off screen. It is cropped to your writing, in dark ink on white, so it is easy for an AI to read.
 - It works offline once it has been opened one time.
 - Check cannot place your answer into a chat automatically: iPadOS does not let one app type into another, so the share menu is the hand-off.
 
