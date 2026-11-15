@@ -135,28 +135,35 @@ function css(name, fallback) { return getComputedStyle(document.documentElement)
 function inkColor() { return css('--ink', '#111'); }
 function remember(state) { history.push(state); if (history.length > 200) history.shift(); }
 
-// `quick` draws each stroke as one even line. It is used while the page is being moved or
-// zoomed, where speed matters more than the fine pressure shading.
-function paint(g, list, scale, color, ox = 0, oy = 0, quick = false) {
+// Every stroke is drawn as one continuous line of even thickness that curves through the
+// points the Pencil reported, so the writing has no joints or corners in it.
+function paint(g, list, scale, color, ox = 0, oy = 0) {
   g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = g.fillStyle = color;
   for (const s of list) {
-    const base = 2.6 * (s.w || 1), pts = s.pts;
-    if (quick && pts.length > 1) {
-      if (s.ap === undefined) { let t = 0; for (const q of pts) t += q.p; s.ap = t / pts.length; }
-      g.lineWidth = base * (0.55 + 0.9 * s.ap) * scale;
-      g.beginPath(); g.moveTo((pts[0].x - ox) * scale, (pts[0].y - oy) * scale);
-      for (let i = 1; i < pts.length; i++) g.lineTo((pts[i].x - ox) * scale, (pts[i].y - oy) * scale);
-      g.stroke(); continue;
+    const width = 2.6 * (s.w || 1) * scale, pts = s.pts, X = q => (q.x - ox) * scale, Y = q => (q.y - oy) * scale;
+    if (pts.length === 1) { g.beginPath(); g.arc(X(pts[0]), Y(pts[0]), width / 2, 0, 7); g.fill(); continue; }
+    g.lineWidth = width; g.beginPath(); g.moveTo(X(pts[0]), Y(pts[0]));
+    g.lineTo((X(pts[0]) + X(pts[1])) / 2, (Y(pts[0]) + Y(pts[1])) / 2);
+    for (let i = 2; i < pts.length; i++) {
+      const c = pts[i - 1], e = pts[i];
+      g.quadraticCurveTo(X(c), Y(c), (X(c) + X(e)) / 2, (Y(c) + Y(e)) / 2);
     }
-    if (pts.length === 1) {
-      g.beginPath(); g.arc((pts[0].x - ox) * scale, (pts[0].y - oy) * scale, base * scale / 2, 0, 7); g.fill(); continue;
-    }
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1], b = pts[i];
-      g.lineWidth = base * (0.55 + 0.9 * (a.p + b.p) / 2) * scale;
-      g.beginPath(); g.moveTo((a.x - ox) * scale, (a.y - oy) * scale); g.lineTo((b.x - ox) * scale, (b.y - oy) * scale); g.stroke();
-    }
+    g.lineTo(X(pts[pts.length - 1]), Y(pts[pts.length - 1]));
+    g.stroke();
   }
+}
+// While a stroke is being written, only its newest piece is added to the screen. The pieces
+// are the same curves `paint` draws, so the stroke looks identical once it is finished.
+// `i` is the newest point; `tail` draws the last short piece up to the Pencil tip.
+function paintPiece(s, i, tail) {
+  const Z = dpr * zoom, pts = s.pts, X = q => (q.x - scrollX) * Z, Y = q => (q.y - scrollY) * Z;
+  const mx = (a, b) => (X(a) + X(b)) / 2, my = (a, b) => (Y(a) + Y(b)) / 2;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = inkColor(); ctx.lineWidth = 2.6 * (s.w || 1) * Z;
+  ctx.beginPath();
+  if (tail) { ctx.moveTo(mx(pts[i - 1], pts[i]), my(pts[i - 1], pts[i])); ctx.lineTo(X(pts[i]), Y(pts[i])); }
+  else if (i === 1) { ctx.moveTo(X(pts[0]), Y(pts[0])); ctx.lineTo(mx(pts[0], pts[1]), my(pts[0], pts[1])); }
+  else { ctx.moveTo(mx(pts[i - 2], pts[i - 1]), my(pts[i - 2], pts[i - 1])); ctx.quadraticCurveTo(X(pts[i - 1]), Y(pts[i - 1]), mx(pts[i - 1], pts[i]), my(pts[i - 1], pts[i])); }
+  ctx.stroke();
 }
 
 // The loop being drawn and the dashed box with its resize dot.
@@ -185,7 +192,7 @@ function redraw() {
     const b = s.bb || (s.bb = boxOf([s])), m = 4 * (s.w || 1);
     return b.x1 + m >= scrollX && b.x0 - m <= scrollX + vw && b.y1 + m >= scrollY && b.y0 - m <= scrollY + vh;
   });
-  paint(ctx, seen, dpr * zoom, inkColor(), scrollX, scrollY, !!(pan && pan.moving));
+  paint(ctx, seen, dpr * zoom, inkColor(), scrollX, scrollY);
   overlay(sel && sel.box);
   if (eraserPos && tool === 'eraser') {
     ctx.save(); ctx.scale(dpr * zoom, dpr * zoom); ctx.translate(-scrollX, -scrollY);
@@ -433,8 +440,9 @@ canvas.addEventListener('pointermove', e => {
     const p = pt(ev);
     if (drawing) {
       const pts = current.s.pts, last = pts[pts.length - 1];
+      if (Math.hypot(p.x - last.x, p.y - last.y) * zoom < 0.8) continue;   // skip points that haven't really moved; they only add wobble
       pts.push(p);
-      paint(ctx, [{ pts: [last, p], w: current.s.w }], dpr * zoom, inkColor(), scrollX, scrollY);
+      paintPiece(current.s, pts.length - 1, false);
     } else if (action.kind === 'erase') {
       // Step along the path so a fast swipe doesn't jump over thin strokes.
       const a = action.last, n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y) * zoom / 6));
@@ -452,7 +460,11 @@ const end = e => {
     fingers.delete(e.pointerId);
     if (pan) { if (fingers.size) pan.at = fingerAt(); else { pan = null; redraw(); } return; }
   }
-  if (current && e.pointerId === current.id) { current = null; return; }
+  if (current && e.pointerId === current.id) {
+    const pts = current.s.pts;
+    if (pts.length > 1) paintPiece(current.s, pts.length - 1, true);
+    current = null; return;
+  }
   if (!action || e.pointerId !== action.id) return;
   if (action.kind === 'erase') {
     if (strokes !== action.before) remember(action.before);
