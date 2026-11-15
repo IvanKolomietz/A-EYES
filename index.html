@@ -64,7 +64,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   display: flex; flex-direction: column; gap: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
 }
 .sheet p { margin: 0; font-size: 13px; color: var(--muted); }
-.sheet .url { color: var(--fg); font-weight: 600; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.sheet .url { flex: 1 1 160px; min-width: 0; align-self: center; font-size: 13px; color: var(--accent); font-weight: 600; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
 .sheet .row { display: flex; flex-wrap: wrap; gap: 8px; }
 .sheet input {
   flex: 1 1 120px; min-width: 0; font: 600 20px ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; text-transform: uppercase;
@@ -78,6 +78,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
 <!-- Buttons sit above the paper so a resting hand can't press them. -->
 <div class="bar" id="bar">
   <button id="eraser" aria-pressed="false">Eraser</button>
+  <button id="select" aria-pressed="false" title="Circle writing to move or resize it">Select</button>
   <button id="undo">Undo</button>
   <button id="clear">Clear</button>
   <button id="finger" aria-pressed="false" title="Allow drawing with a finger">Finger</button>
@@ -92,7 +93,11 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   <div class="status" id="status" role="status"></div>
   <div class="sheet" id="sheet" hidden>
     <strong>Send answers to your laptop</strong>
-    <p>On the laptop, open <span class="url" id="recvurl"></span> and type the code it shows.</p>
+    <p>On the laptop, open the receive page and type the code it shows:</p>
+    <div class="row">
+      <a class="url" id="recvurl" target="_blank" rel="noopener"></a>
+      <button id="copylink">Copy link</button>
+    </div>
     <div class="row">
       <input id="code" type="text" maxlength="9" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="CODE" aria-label="Pairing code">
       <button id="pair" class="primary">Connect</button>
@@ -108,33 +113,113 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
 <script>
 const $ = id => document.getElementById(id);
 const canvas = $('c'), ctx = canvas.getContext('2d');
-let strokes = [], current = null, erasing = false, fingerOk = false;
+// A stroke is {pts: [{x, y, p}], w}: points in CSS pixels with pressure, and a thickness multiplier.
+// Strokes are never changed once finished; erasing, moving and resizing make new ones, so every
+// earlier state can be kept in `history` for Undo.
+let strokes = [], history = [], tool = 'pen', fingerOk = false;
+let current = null;   // {id, s}: the pen stroke being drawn
+let action = null;    // {id, kind: 'erase' | 'lasso' | 'drag', before}: any other gesture in progress
+let sel = null;       // {ids: Set of strokes, box}: the current selection
+let lasso = null;     // points of the loop being drawn
+let drag = null;      // {mode: 'move' | 'scale', start, orig, ids, box}
 let dpr = 1, W = 0, H = 0, statusTimer = null;
+const BOX_PAD = 10, HANDLE = 9;
 
-function inkColor() { return getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#111'; }
+function css(name, fallback) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback; }
+function inkColor() { return css('--ink', '#111'); }
+function remember(state) { history.push(state); if (history.length > 200) history.shift(); }
 
 function paint(g, list, scale, color, ox = 0, oy = 0) {
-  g.lineCap = 'round'; g.lineJoin = 'round';
+  g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = g.fillStyle = color;
   for (const s of list) {
-    g.globalCompositeOperation = s.erase ? 'destination-out' : 'source-over';
-    g.strokeStyle = g.fillStyle = color;
-    const base = s.erase ? 26 : 2.6, pts = s.pts;
+    const base = 2.6 * (s.w || 1), pts = s.pts;
     if (pts.length === 1) {
       g.beginPath(); g.arc((pts[0].x - ox) * scale, (pts[0].y - oy) * scale, base * scale / 2, 0, 7); g.fill(); continue;
     }
     for (let i = 1; i < pts.length; i++) {
       const a = pts[i - 1], b = pts[i];
-      g.lineWidth = base * (s.erase ? 1 : 0.55 + 0.9 * (a.p + b.p) / 2) * scale;
+      g.lineWidth = base * (0.55 + 0.9 * (a.p + b.p) / 2) * scale;
       g.beginPath(); g.moveTo((a.x - ox) * scale, (a.y - oy) * scale); g.lineTo((b.x - ox) * scale, (b.y - oy) * scale); g.stroke();
     }
   }
-  g.globalCompositeOperation = 'source-over';
 }
 
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   paint(ctx, strokes, dpr, inkColor());
+  if (lasso || sel) {
+    ctx.save(); ctx.scale(dpr, dpr);
+    ctx.strokeStyle = ctx.fillStyle = css('--accent', '#1f6f5c'); ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
+    if (lasso && lasso.length > 1) {
+      ctx.beginPath(); ctx.moveTo(lasso[0].x, lasso[0].y);
+      for (const p of lasso) ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+    if (sel) {
+      const b = sel.box;
+      ctx.strokeRect(b.x0 - BOX_PAD, b.y0 - BOX_PAD, b.x1 - b.x0 + 2 * BOX_PAD, b.y1 - b.y0 + 2 * BOX_PAD);
+      ctx.setLineDash([]); ctx.beginPath(); ctx.arc(b.x1 + BOX_PAD, b.y1 + BOX_PAD, HANDLE, 0, 7); ctx.fill();   // resize handle
+    }
+    ctx.restore();
+  }
   $('hint').hidden = strokes.length > 0;
+}
+
+function boxOf(list) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const s of list) for (const p of s.pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  return { x0, y0, x1, y1 };
+}
+function inPoly(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+function segDist(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, len = dx * dx + dy * dy;
+  const t = len ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len)) : 0;
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+// Rub out whatever lies under the eraser, cutting strokes in two where it passes through them.
+function eraseAt(p) {
+  const R = 13, out = [];
+  let changed = false;
+  for (const s of strokes) {
+    let piece = [], hit = false;
+    for (const q of s.pts) {
+      if (Math.hypot(q.x - p.x, q.y - p.y) < R) { hit = true; if (piece.length) { out.push({ pts: piece, w: s.w }); piece = []; } continue; }
+      if (piece.length && segDist(p, piece[piece.length - 1], q) < R) { hit = true; out.push({ pts: piece, w: s.w }); piece = []; }
+      piece.push(q);
+    }
+    if (!hit) { out.push(s); continue; }
+    changed = true;
+    if (piece.length) out.push({ pts: piece, w: s.w });
+  }
+  if (changed) { strokes = out; redraw(); }
+}
+
+// Move or resize the selected strokes, always starting from how they were when the drag began.
+function applyDrag(p) {
+  const b = drag.box;
+  let f, k = 1;
+  if (drag.mode === 'move') {
+    const dx = p.x - drag.start.x, dy = p.y - drag.start.y;
+    f = q => ({ x: q.x + dx, y: q.y + dy, p: q.p });
+  } else {
+    const w = Math.max(1, b.x1 - b.x0), h = Math.max(1, b.y1 - b.y0);
+    k = Math.min(6, Math.max(0.2, Math.max((p.x - BOX_PAD - b.x0) / w, (p.y - BOX_PAD - b.y0) / h)));
+    f = q => ({ x: b.x0 + (q.x - b.x0) * k, y: b.y0 + (q.y - b.y0) * k, p: q.p });
+  }
+  const next = new Set();
+  strokes = drag.orig.map(s => {
+    if (!drag.ids.has(s)) return s;
+    const n = { pts: s.pts.map(f), w: (s.w || 1) * k }; next.add(n); return n;
+  });
+  sel = { ids: next, box: boxOf([...next]) };
 }
 
 function resize() {
@@ -165,7 +250,7 @@ for (const type of ['contextmenu', 'selectstart', 'dblclick']) document.addEvent
 
 // Ignore button presses made by a hand while the Pencil is writing or has just lifted.
 let blockTap = false;
-$('bar').addEventListener('pointerdown', e => { blockTap = e.pointerType === 'touch' && (current !== null || performance.now() - lastPen < 800); }, true);
+$('bar').addEventListener('pointerdown', e => { blockTap = e.pointerType === 'touch' && (current !== null || action !== null || performance.now() - lastPen < 800); }, true);
 $('bar').addEventListener('click', e => { if (blockTap) { e.stopPropagation(); e.preventDefault(); blockTap = false; } }, true);
 
 canvas.addEventListener('pointerdown', e => {
@@ -173,29 +258,72 @@ canvas.addEventListener('pointerdown', e => {
   e.preventDefault();
   if (e.pointerType === 'pen') lastPen = performance.now();
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
-  current = { erase: erasing, pts: [pt(e)], id: e.pointerId };
-  strokes.push(current); redraw();
+  if (current || action) return;                         // one gesture at a time
+  const p = pt(e);
+  if (tool === 'pen') {
+    remember(strokes.slice());
+    const s = { pts: [p], w: 1 };
+    strokes.push(s); current = { id: e.pointerId, s }; redraw();
+    return;
+  }
+  if (tool === 'eraser') { action = { id: e.pointerId, kind: 'erase', before: strokes, last: p }; eraseAt(p); return; }
+  // Select: grab the resize handle, grab the selection to move it, or start circling something new.
+  if (sel) {
+    const b = sel.box;
+    const onHandle = Math.hypot(p.x - (b.x1 + BOX_PAD), p.y - (b.y1 + BOX_PAD)) < 26;
+    const inBox = p.x >= b.x0 - BOX_PAD && p.x <= b.x1 + BOX_PAD && p.y >= b.y0 - BOX_PAD && p.y <= b.y1 + BOX_PAD;
+    if (onHandle || inBox) {
+      drag = { mode: onHandle ? 'scale' : 'move', start: p, orig: strokes, ids: sel.ids, box: b };
+      action = { id: e.pointerId, kind: 'drag' };
+      return;
+    }
+  }
+  sel = null; lasso = [p]; action = { id: e.pointerId, kind: 'lasso' }; redraw();
 });
 canvas.addEventListener('pointermove', e => {
-  if (!current || e.pointerId !== current.id) return;
+  const drawing = current && e.pointerId === current.id, acting = action && e.pointerId === action.id;
+  if (!drawing && !acting) return;
   e.preventDefault();
   const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   for (const ev of (evs.length ? evs : [e])) {
-    const p = pt(ev), last = current.pts[current.pts.length - 1];
-    current.pts.push(p);
-    paint(ctx, [{ erase: current.erase, pts: [last, p] }], dpr, inkColor());
+    const p = pt(ev);
+    if (drawing) {
+      const pts = current.s.pts, last = pts[pts.length - 1];
+      pts.push(p);
+      paint(ctx, [{ pts: [last, p], w: 1 }], dpr, inkColor());
+    } else if (action.kind === 'erase') {
+      // Step along the path so a fast swipe doesn't jump over thin strokes.
+      const a = action.last, n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y) / 6));
+      for (let i = 1; i <= n; i++) eraseAt({ x: a.x + (p.x - a.x) * i / n, y: a.y + (p.y - a.y) * i / n });
+      action.last = p;
+    }
+    else if (action.kind === 'lasso') lasso.push(p);
+    else applyDrag(p);
   }
+  if (acting && action.kind !== 'erase') redraw();
 });
 const end = e => {
-  if (!current || e.pointerId !== current.id) return;
   if (e.pointerType === 'pen') lastPen = performance.now();
-  current = null;
+  if (current && e.pointerId === current.id) { current = null; return; }
+  if (!action || e.pointerId !== action.id) return;
+  if (action.kind === 'erase') {
+    if (strokes !== action.before) remember(action.before);
+  } else if (action.kind === 'lasso') {
+    const loop = lasso; lasso = null;
+    const picked = loop.length < 3 ? [] : strokes.filter(s => s.pts.filter(q => inPoly(q, loop)).length >= s.pts.length * 0.6);
+    sel = picked.length ? { ids: new Set(picked), box: boxOf(picked) } : null;
+    if (!sel && loop.length > 8) say('Circle some writing to select it');
+  } else {
+    if (strokes !== drag.orig) remember(drag.orig);
+    drag = null;
+  }
+  action = null; redraw();
 };
 canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('lostpointercapture', end);
 
-function hasInk() { return strokes.some(s => !s.erase); }
+function hasInk() { return strokes.length > 0; }
 
 function say(text, ms = 2600) {
   const el = $('status'); el.textContent = text; el.classList.add('show');
@@ -303,7 +431,13 @@ function showLaptopState() {
   $('unpair').hidden = !laptopCode;
   $('check').textContent = laptopCode ? 'Send' : 'Check';
 }
-$('recvurl').textContent = new URL('receive.html', location.href).href.replace(/^https?:\/\//, '');
+const RECEIVE_URL = new URL('receive.html', location.href).href;
+$('recvurl').href = RECEIVE_URL;
+$('recvurl').textContent = RECEIVE_URL.replace(/^https?:\/\//, '');
+$('copylink').onclick = async () => {
+  try { await navigator.clipboard.writeText(RECEIVE_URL); $('sheetmsg').textContent = 'Link copied. Send it to your laptop.'; }
+  catch (err) { $('sheetmsg').textContent = 'Could not copy. Type the address on your laptop instead.'; }
+};
 $('laptop').onclick = () => { $('sheet').hidden = !$('sheet').hidden; if (!$('sheet').hidden) { $('code').value = laptopCode || ''; $('sheetmsg').textContent = laptopCode ? 'Paired. Send goes to your laptop.' : ''; } };
 $('closesheet').onclick = () => { $('sheet').hidden = true; };
 $('unpair').onclick = () => {
@@ -342,10 +476,24 @@ $('check').onclick = async () => {
   } catch (err) { if (err && err.name !== 'AbortError') say('Sending did not work. Try Copy.', 4000); }
 };
 
-$('eraser').onclick = () => { erasing = !erasing; $('eraser').classList.toggle('on', erasing); $('eraser').setAttribute('aria-pressed', erasing); };
+function setTool(t) {
+  tool = tool === t ? 'pen' : t;                         // tapping the active tool goes back to the pen
+  for (const name of ['eraser', 'select']) { $(name).classList.toggle('on', tool === name); $(name).setAttribute('aria-pressed', tool === name); }
+  sel = null; lasso = null; redraw();
+  if (tool === 'select') say('Circle writing, then drag it. Drag the dot to resize.', 3500);
+}
+$('eraser').onclick = () => setTool('eraser');
+$('select').onclick = () => setTool('select');
 $('finger').onclick = () => { fingerOk = !fingerOk; $('finger').classList.toggle('on', fingerOk); $('finger').setAttribute('aria-pressed', fingerOk); };
-$('undo').onclick = () => { strokes.pop(); redraw(); };
-$('clear').onclick = () => { strokes = []; redraw(); };
+$('undo').onclick = () => {
+  if (!history.length) { say('Nothing to undo'); return; }
+  strokes = history.pop(); sel = null; lasso = null; redraw();
+};
+$('clear').onclick = () => {
+  if (!strokes.length) return;
+  remember(strokes); strokes = []; sel = null; lasso = null; redraw();
+  say('Cleared. Undo brings it back.');
+};
 document.addEventListener('gesturestart', e => e.preventDefault());
 
 resize();
