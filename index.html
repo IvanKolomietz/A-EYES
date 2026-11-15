@@ -346,6 +346,7 @@ const end = e => {
   if (!action || e.pointerId !== action.id) return;
   if (action.kind === 'erase') {
     if (strokes !== action.before) remember(action.before);
+    if (tool === 'eraser') setTool('eraser');            // lifting the Pencil after erasing goes back to the pen
   } else if (action.kind === 'lasso') {
     const loop = lasso; lasso = null;
     const picked = loop.length < 3 ? [] : strokes.filter(s => s.pts.filter(q => inPoly(q, loop)).length >= s.pts.length * 0.5);

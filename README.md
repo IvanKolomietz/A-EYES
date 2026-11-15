@@ -35,7 +35,7 @@ To go back to the share menu, tap **Laptop**, then **Stop sending to laptop**.
 
 | Button | What it does |
 | --- | --- |
-| Eraser | Rubs out whatever you drag over. Tap it again to go back to the pen |
+| Eraser | Rubs out whatever you drag over. It switches back to the pen when you lift the Pencil |
 | Select | Circle some writing, then drag it to move it, or drag the dot at its corner to resize it. Tap Select again to go back to the pen |
 | Undo | Takes back the last thing you did, including an erase, a move, a resize, or a Clear |
 | Clear | Wipes the pad. Undo brings it back |
