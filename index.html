@@ -144,25 +144,57 @@ function paint(g, list, scale, color, ox = 0, oy = 0) {
   }
 }
 
+// The loop being drawn and the dashed box with its resize dot.
+function overlay(b) {
+  if (!lasso && !b) return;
+  ctx.save(); ctx.scale(dpr, dpr);
+  ctx.strokeStyle = ctx.fillStyle = css('--accent', '#1f6f5c'); ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
+  if (lasso && lasso.length > 1) {
+    ctx.beginPath(); ctx.moveTo(lasso[0].x, lasso[0].y);
+    for (const p of lasso) ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+  if (b) {
+    ctx.strokeRect(b.x0 - BOX_PAD, b.y0 - BOX_PAD, b.x1 - b.x0 + 2 * BOX_PAD, b.y1 - b.y0 + 2 * BOX_PAD);
+    ctx.setLineDash([]); ctx.beginPath(); ctx.arc(b.x1 + BOX_PAD, b.y1 + BOX_PAD, HANDLE, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   paint(ctx, strokes, dpr, inkColor());
-  if (lasso || sel) {
-    ctx.save(); ctx.scale(dpr, dpr);
-    ctx.strokeStyle = ctx.fillStyle = css('--accent', '#1f6f5c'); ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
-    if (lasso && lasso.length > 1) {
-      ctx.beginPath(); ctx.moveTo(lasso[0].x, lasso[0].y);
-      for (const p of lasso) ctx.lineTo(p.x, p.y);
-      ctx.stroke();
-    }
-    if (sel) {
-      const b = sel.box;
-      ctx.strokeRect(b.x0 - BOX_PAD, b.y0 - BOX_PAD, b.x1 - b.x0 + 2 * BOX_PAD, b.y1 - b.y0 + 2 * BOX_PAD);
-      ctx.setLineDash([]); ctx.beginPath(); ctx.arc(b.x1 + BOX_PAD, b.y1 + BOX_PAD, HANDLE, 0, 7); ctx.fill();   // resize handle
-    }
-    ctx.restore();
-  }
+  overlay(sel && sel.box);
   $('hint').hidden = strokes.length > 0;
+}
+
+// While circling or dragging, the page is kept as ready-made pictures, so each screen
+// refresh is a couple of image copies instead of redrawing every stroke.
+let cache = null, framePending = false;
+function layer(list) {
+  const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height;
+  paint(c.getContext('2d'), list, dpr, inkColor());
+  return c;
+}
+function frame() {
+  if (framePending) return;
+  framePending = true;
+  requestAnimationFrame(() => { framePending = false; drawLive(); });
+}
+function drawLive() {
+  if (!cache) { redraw(); return; }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(cache.bg, 0, 0);
+  let box = null;
+  if (drag) {
+    const t = dragShape(), b = drag.box;
+    ctx.save();
+    ctx.translate((b.x0 + t.dx) * dpr, (b.y0 + t.dy) * dpr); ctx.scale(t.k, t.k); ctx.translate(-b.x0 * dpr, -b.y0 * dpr);
+    ctx.drawImage(cache.fg, 0, 0);
+    ctx.restore();
+    box = { x0: b.x0 + t.dx, y0: b.y0 + t.dy, x1: b.x0 + t.dx + (b.x1 - b.x0) * t.k, y1: b.y0 + t.dy + (b.y1 - b.y0) * t.k };
+  }
+  overlay(box);
 }
 
 function boxOf(list) {
@@ -202,24 +234,29 @@ function eraseAt(p) {
   if (changed) { strokes = out; redraw(); }
 }
 
-// Move or resize the selected strokes, always starting from how they were when the drag began.
-function applyDrag(p) {
-  const b = drag.box;
-  let f, k = 1;
-  if (drag.mode === 'move') {
-    const dx = p.x - drag.start.x, dy = p.y - drag.start.y;
-    f = q => ({ x: q.x + dx, y: q.y + dy, p: q.p });
-  } else {
-    const w = Math.max(1, b.x1 - b.x0), h = Math.max(1, b.y1 - b.y0);
-    k = Math.min(6, Math.max(0.2, Math.max((p.x - BOX_PAD - b.x0) / w, (p.y - BOX_PAD - b.y0) / h)));
-    f = q => ({ x: b.x0 + (q.x - b.x0) * k, y: b.y0 + (q.y - b.y0) * k, p: q.p });
-  }
+// How far the selection has been moved, or how much it has been resized, since the drag began.
+// Resizing follows the Pencil along the line from the box's top-left corner to where the dot
+// was grabbed, so it starts at exactly 1x with no jump.
+function dragShape() {
+  const p = drag.p || drag.start, b = drag.box;
+  if (drag.mode === 'move') return { dx: p.x - drag.start.x, dy: p.y - drag.start.y, k: 1 };
+  const sx = drag.start.x - b.x0, sy = drag.start.y - b.y0, len = sx * sx + sy * sy || 1;
+  const k = ((p.x - b.x0) * sx + (p.y - b.y0) * sy) / len;
+  return { dx: 0, dy: 0, k: Math.min(6, Math.max(0.2, k)) };
+}
+
+// Make the move or resize permanent once the Pencil lifts.
+function commitDrag() {
+  const t = dragShape(), b = drag.box;
+  if (!drag.p || (t.dx === 0 && t.dy === 0 && t.k === 1)) return;
+  const f = q => ({ x: b.x0 + (q.x - b.x0) * t.k + t.dx, y: b.y0 + (q.y - b.y0) * t.k + t.dy, p: q.p });
   const next = new Set();
   strokes = drag.orig.map(s => {
     if (!drag.ids.has(s)) return s;
-    const n = { pts: s.pts.map(f), w: (s.w || 1) * k }; next.add(n); return n;
+    const n = { pts: s.pts.map(f), w: (s.w || 1) * t.k }; next.add(n); return n;
   });
   sel = { ids: next, box: boxOf([...next]) };
+  remember(drag.orig);
 }
 
 function resize() {
@@ -273,12 +310,13 @@ canvas.addEventListener('pointerdown', e => {
     const onHandle = Math.hypot(p.x - (b.x1 + BOX_PAD), p.y - (b.y1 + BOX_PAD)) < 26;
     const inBox = p.x >= b.x0 - BOX_PAD && p.x <= b.x1 + BOX_PAD && p.y >= b.y0 - BOX_PAD && p.y <= b.y1 + BOX_PAD;
     if (onHandle || inBox) {
-      drag = { mode: onHandle ? 'scale' : 'move', start: p, orig: strokes, ids: sel.ids, box: b };
+      drag = { mode: onHandle ? 'scale' : 'move', start: p, p: null, orig: strokes, ids: sel.ids, box: b };
+      cache = { bg: layer(strokes.filter(s => !sel.ids.has(s))), fg: layer([...sel.ids]) };
       action = { id: e.pointerId, kind: 'drag' };
       return;
     }
   }
-  sel = null; lasso = [p]; action = { id: e.pointerId, kind: 'lasso' }; redraw();
+  sel = null; lasso = [p]; cache = { bg: layer(strokes) }; action = { id: e.pointerId, kind: 'lasso' }; frame();
 });
 canvas.addEventListener('pointermove', e => {
   const drawing = current && e.pointerId === current.id, acting = action && e.pointerId === action.id;
@@ -298,9 +336,9 @@ canvas.addEventListener('pointermove', e => {
       action.last = p;
     }
     else if (action.kind === 'lasso') lasso.push(p);
-    else applyDrag(p);
+    else drag.p = p;
   }
-  if (acting && action.kind !== 'erase') redraw();
+  if (acting && action.kind !== 'erase') frame();
 });
 const end = e => {
   if (e.pointerType === 'pen') lastPen = performance.now();
@@ -310,14 +348,14 @@ const end = e => {
     if (strokes !== action.before) remember(action.before);
   } else if (action.kind === 'lasso') {
     const loop = lasso; lasso = null;
-    const picked = loop.length < 3 ? [] : strokes.filter(s => s.pts.filter(q => inPoly(q, loop)).length >= s.pts.length * 0.6);
+    const picked = loop.length < 3 ? [] : strokes.filter(s => s.pts.filter(q => inPoly(q, loop)).length >= s.pts.length * 0.5);
     sel = picked.length ? { ids: new Set(picked), box: boxOf(picked) } : null;
     if (!sel && loop.length > 8) say('Circle some writing to select it');
   } else {
-    if (strokes !== drag.orig) remember(drag.orig);
+    commitDrag();
     drag = null;
   }
-  action = null; redraw();
+  action = null; cache = null; redraw();
 };
 canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
