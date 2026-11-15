@@ -123,7 +123,8 @@ let sel = null;       // {ids: Set of strokes, box}: the current selection
 let lasso = null;     // points of the loop being drawn
 let drag = null;      // {mode: 'move' | 'scale', start, orig, ids, box}
 let dpr = 1, W = 0, H = 0, statusTimer = null;
-const BOX_PAD = 10, HANDLE = 9;
+const BOX_PAD = 10, HANDLE = 9, ERASE_R = 13;
+let eraserPos = null;   // where the eraser is, so its circle can be shown
 
 function css(name, fallback) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback; }
 function inkColor() { return css('--ink', '#111'); }
@@ -165,7 +166,16 @@ function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   paint(ctx, strokes, dpr, inkColor());
   overlay(sel && sel.box);
+  if (eraserPos && tool === 'eraser') {
+    ctx.save(); ctx.scale(dpr, dpr);
+    ctx.beginPath(); ctx.arc(eraserPos.x, eraserPos.y, ERASE_R, 0, 7);
+    ctx.globalAlpha = 0.18; ctx.fillStyle = css('--muted', '#777'); ctx.fill();
+    ctx.globalAlpha = 1; ctx.lineWidth = 1.5; ctx.strokeStyle = css('--fg', '#222'); ctx.stroke();
+    ctx.restore();
+  }
   $('hint').hidden = strokes.length > 0;
+  const label = sel ? 'Delete' : 'Clear';              // with writing selected, Clear removes just that
+  if ($('clear').textContent !== label) $('clear').textContent = label;
 }
 
 // While circling or dragging, the page is kept as ready-made pictures, so each screen
@@ -217,10 +227,14 @@ function segDist(p, a, b) {
 }
 
 // Rub out whatever lies under the eraser, cutting strokes in two where it passes through them.
+// Only strokes whose bounding box is near the eraser are looked at, and the screen is
+// refreshed once per frame by the caller, so long erasing sessions stay quick.
 function eraseAt(p) {
-  const R = 13, out = [];
+  const R = ERASE_R, out = [];
   let changed = false;
   for (const s of strokes) {
+    const bb = s.bb || (s.bb = boxOf([s]));
+    if (p.x < bb.x0 - R || p.x > bb.x1 + R || p.y < bb.y0 - R || p.y > bb.y1 + R) { out.push(s); continue; }
     let piece = [], hit = false;
     for (const q of s.pts) {
       if (Math.hypot(q.x - p.x, q.y - p.y) < R) { hit = true; if (piece.length) { out.push({ pts: piece, w: s.w }); piece = []; } continue; }
@@ -231,7 +245,7 @@ function eraseAt(p) {
     changed = true;
     if (piece.length) out.push({ pts: piece, w: s.w });
   }
-  if (changed) { strokes = out; redraw(); }
+  if (changed) strokes = out;
 }
 
 // How far the selection has been moved, or how much it has been resized, since the drag began.
@@ -303,7 +317,7 @@ canvas.addEventListener('pointerdown', e => {
     strokes.push(s); current = { id: e.pointerId, s }; redraw();
     return;
   }
-  if (tool === 'eraser') { action = { id: e.pointerId, kind: 'erase', before: strokes, last: p }; eraseAt(p); return; }
+  if (tool === 'eraser') { action = { id: e.pointerId, kind: 'erase', before: strokes, last: p }; eraseAt(p); eraserPos = p; redraw(); return; }
   // Select: grab the resize handle, grab the selection to move it, or start circling something new.
   if (sel) {
     const b = sel.box;
@@ -320,7 +334,11 @@ canvas.addEventListener('pointerdown', e => {
 });
 canvas.addEventListener('pointermove', e => {
   const drawing = current && e.pointerId === current.id, acting = action && e.pointerId === action.id;
-  if (!drawing && !acting) return;
+  if (!drawing && !acting) {
+    // A hovering Pencil (or a mouse) shows where the eraser will land.
+    if (tool === 'eraser' && !current && !action && e.pointerType !== 'touch') { eraserPos = pt(e); frame(); }
+    return;
+  }
   e.preventDefault();
   const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   for (const ev of (evs.length ? evs : [e])) {
@@ -333,12 +351,12 @@ canvas.addEventListener('pointermove', e => {
       // Step along the path so a fast swipe doesn't jump over thin strokes.
       const a = action.last, n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y) / 6));
       for (let i = 1; i <= n; i++) eraseAt({ x: a.x + (p.x - a.x) * i / n, y: a.y + (p.y - a.y) * i / n });
-      action.last = p;
+      action.last = eraserPos = p;
     }
     else if (action.kind === 'lasso') lasso.push(p);
     else drag.p = p;
   }
-  if (acting && action.kind !== 'erase') frame();
+  if (acting) frame();
 });
 const end = e => {
   if (e.pointerType === 'pen') lastPen = performance.now();
@@ -346,6 +364,7 @@ const end = e => {
   if (!action || e.pointerId !== action.id) return;
   if (action.kind === 'erase') {
     if (strokes !== action.before) remember(action.before);
+    eraserPos = null;
     if (tool === 'eraser') setTool('eraser');            // lifting the Pencil after erasing goes back to the pen
   } else if (action.kind === 'lasso') {
     const loop = lasso; lasso = null;
@@ -361,6 +380,7 @@ const end = e => {
 canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('lostpointercapture', end);
+canvas.addEventListener('pointerleave', () => { if (eraserPos && !action) { eraserPos = null; frame(); } });
 
 function hasInk() { return strokes.length > 0; }
 
@@ -518,8 +538,8 @@ $('check').onclick = async () => {
 function setTool(t) {
   tool = tool === t ? 'pen' : t;                         // tapping the active tool goes back to the pen
   for (const name of ['eraser', 'select']) { $(name).classList.toggle('on', tool === name); $(name).setAttribute('aria-pressed', tool === name); }
-  sel = null; lasso = null; redraw();
-  if (tool === 'select') say('Circle writing, then drag it. Drag the dot to resize.', 3500);
+  sel = null; lasso = null; eraserPos = null; redraw();
+  if (tool === 'select') say('Circle writing, then drag it. Drag the dot to resize, or tap Delete.', 3500);
 }
 $('eraser').onclick = () => setTool('eraser');
 $('select').onclick = () => setTool('select');
@@ -530,6 +550,11 @@ $('undo').onclick = () => {
 };
 $('clear').onclick = () => {
   if (!strokes.length) return;
+  if (sel) {
+    remember(strokes); strokes = strokes.filter(s => !sel.ids.has(s)); sel = null; redraw();
+    say('Deleted. Undo brings it back.');
+    return;
+  }
   remember(strokes); strokes = []; sel = null; lasso = null; redraw();
   say('Cleared. Undo brings it back.');
 };
