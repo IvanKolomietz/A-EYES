@@ -89,7 +89,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
 </div>
 <div class="pad" id="pad">
   <canvas id="c"></canvas>
-  <div class="hint" id="hint">Write your answer with Apple Pencil, then tap Check and pick your AI app. Drag with a finger to move the page for more room.</div>
+  <div class="hint" id="hint">Write your answer with Apple Pencil, then tap Check and pick your AI app. Drag with a finger to move the page, and pinch with two fingers to zoom.</div>
   <div class="status" id="status" role="status"></div>
   <div class="sheet" id="sheet" hidden>
     <strong>Send answers to your laptop</strong>
@@ -126,7 +126,8 @@ let dpr = 1, W = 0, H = 0, statusTimer = null;
 const BOX_PAD = 10, HANDLE = 9, ERASE_R = 13;
 // The page is bigger than the screen: strokes are stored in page positions, and `scrollX` and
 // `scrollY` say where the visible part starts. A finger drag moves the page (two fingers when Finger is on).
-let scrollX = 0, scrollY = 0, pan = null;
+let scrollX = 0, scrollY = 0, zoom = 1, pan = null;   // two fingers pinch to zoom
+const ZOOM_MIN = 0.4, ZOOM_MAX = 4;
 const fingers = new Map();
 let eraserPos = null;   // where the eraser is, so its circle can be shown
 
@@ -134,10 +135,19 @@ function css(name, fallback) { return getComputedStyle(document.documentElement)
 function inkColor() { return css('--ink', '#111'); }
 function remember(state) { history.push(state); if (history.length > 200) history.shift(); }
 
-function paint(g, list, scale, color, ox = 0, oy = 0) {
+// `quick` draws each stroke as one even line. It is used while the page is being moved or
+// zoomed, where speed matters more than the fine pressure shading.
+function paint(g, list, scale, color, ox = 0, oy = 0, quick = false) {
   g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = g.fillStyle = color;
   for (const s of list) {
     const base = 2.6 * (s.w || 1), pts = s.pts;
+    if (quick && pts.length > 1) {
+      if (s.ap === undefined) { let t = 0; for (const q of pts) t += q.p; s.ap = t / pts.length; }
+      g.lineWidth = base * (0.55 + 0.9 * s.ap) * scale;
+      g.beginPath(); g.moveTo((pts[0].x - ox) * scale, (pts[0].y - oy) * scale);
+      for (let i = 1; i < pts.length; i++) g.lineTo((pts[i].x - ox) * scale, (pts[i].y - oy) * scale);
+      g.stroke(); continue;
+    }
     if (pts.length === 1) {
       g.beginPath(); g.arc((pts[0].x - ox) * scale, (pts[0].y - oy) * scale, base * scale / 2, 0, 7); g.fill(); continue;
     }
@@ -152,29 +162,36 @@ function paint(g, list, scale, color, ox = 0, oy = 0) {
 // The loop being drawn and the dashed box with its resize dot.
 function overlay(b) {
   if (!lasso && !b) return;
-  ctx.save(); ctx.scale(dpr, dpr); ctx.translate(-scrollX, -scrollY);
-  ctx.strokeStyle = ctx.fillStyle = css('--accent', '#1f6f5c'); ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
+  ctx.save(); ctx.scale(dpr * zoom, dpr * zoom); ctx.translate(-scrollX, -scrollY);
+  ctx.strokeStyle = ctx.fillStyle = css('--accent', '#1f6f5c'); ctx.lineWidth = 1.5 / zoom; ctx.setLineDash([6 / zoom, 5 / zoom]);
   if (lasso && lasso.length > 1) {
     ctx.beginPath(); ctx.moveTo(lasso[0].x, lasso[0].y);
     for (const p of lasso) ctx.lineTo(p.x, p.y);
     ctx.stroke();
   }
   if (b) {
-    ctx.strokeRect(b.x0 - BOX_PAD, b.y0 - BOX_PAD, b.x1 - b.x0 + 2 * BOX_PAD, b.y1 - b.y0 + 2 * BOX_PAD);
-    ctx.setLineDash([]); ctx.beginPath(); ctx.arc(b.x1 + BOX_PAD, b.y1 + BOX_PAD, HANDLE, 0, 7); ctx.fill();
+    ctx.strokeRect(b.x0 - (BOX_PAD / zoom), b.y0 - (BOX_PAD / zoom), b.x1 - b.x0 + 2 * (BOX_PAD / zoom), b.y1 - b.y0 + 2 * (BOX_PAD / zoom));
+    ctx.setLineDash([]); ctx.beginPath(); ctx.arc(b.x1 + (BOX_PAD / zoom), b.y1 + (BOX_PAD / zoom), HANDLE / zoom, 0, 7); ctx.fill();
   }
   ctx.restore();
 }
 
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  paint(ctx, strokes, dpr, inkColor(), scrollX, scrollY);
+  // Only writing that is on screen is drawn.
+  const vw = W / zoom, vh = H / zoom, live = current && current.s;
+  const seen = strokes.filter(s => {
+    if (s === live) return true;
+    const b = s.bb || (s.bb = boxOf([s])), m = 4 * (s.w || 1);
+    return b.x1 + m >= scrollX && b.x0 - m <= scrollX + vw && b.y1 + m >= scrollY && b.y0 - m <= scrollY + vh;
+  });
+  paint(ctx, seen, dpr * zoom, inkColor(), scrollX, scrollY, !!(pan && pan.moving));
   overlay(sel && sel.box);
   if (eraserPos && tool === 'eraser') {
-    ctx.save(); ctx.scale(dpr, dpr); ctx.translate(-scrollX, -scrollY);
-    ctx.beginPath(); ctx.arc(eraserPos.x, eraserPos.y, ERASE_R, 0, 7);
+    ctx.save(); ctx.scale(dpr * zoom, dpr * zoom); ctx.translate(-scrollX, -scrollY);
+    ctx.beginPath(); ctx.arc(eraserPos.x, eraserPos.y, ERASE_R / zoom, 0, 7);
     ctx.globalAlpha = 0.18; ctx.fillStyle = css('--muted', '#777'); ctx.fill();
-    ctx.globalAlpha = 1; ctx.lineWidth = 1.5; ctx.strokeStyle = css('--fg', '#222'); ctx.stroke();
+    ctx.globalAlpha = 1; ctx.lineWidth = 1.5 / zoom; ctx.strokeStyle = css('--fg', '#222'); ctx.stroke();
     ctx.restore();
   }
   $('hint').hidden = strokes.length > 0;
@@ -187,7 +204,7 @@ function redraw() {
 let cache = null, framePending = false;
 function layer(list) {
   const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height;
-  paint(c.getContext('2d'), list, dpr, inkColor(), scrollX, scrollY);
+  paint(c.getContext('2d'), list, dpr * zoom, inkColor(), scrollX, scrollY);
   return c;
 }
 function frame() {
@@ -203,7 +220,8 @@ function drawLive() {
   if (drag) {
     const t = dragShape(), b = drag.box;
     ctx.save();
-    ctx.translate((b.x0 - scrollX + t.dx) * dpr, (b.y0 - scrollY + t.dy) * dpr); ctx.scale(t.k, t.k); ctx.translate(-(b.x0 - scrollX) * dpr, -(b.y0 - scrollY) * dpr);
+    const Z = dpr * zoom;
+    ctx.translate((b.x0 - scrollX + t.dx) * Z, (b.y0 - scrollY + t.dy) * Z); ctx.scale(t.k, t.k); ctx.translate(-(b.x0 - scrollX) * Z, -(b.y0 - scrollY) * Z);
     ctx.drawImage(cache.fg, 0, 0);
     ctx.restore();
     box = { x0: b.x0 + t.dx, y0: b.y0 + t.dy, x1: b.x0 + t.dx + (b.x1 - b.x0) * t.k, y1: b.y0 + t.dy + (b.y1 - b.y0) * t.k };
@@ -234,7 +252,7 @@ function segDist(p, a, b) {
 // Only strokes whose bounding box is near the eraser are looked at, and the screen is
 // refreshed once per frame by the caller, so long erasing sessions stay quick.
 function eraseAt(p) {
-  const R = ERASE_R, out = [];
+  const R = ERASE_R / zoom, out = [];
   let changed = false;
   for (const s of strokes) {
     const bb = s.bb || (s.bb = boxOf([s]));
@@ -279,21 +297,40 @@ function commitDrag() {
 
 // The page can be moved in any direction until the writing is about to leave the screen,
 // which always leaves most of a screen of empty space on the side you are heading to.
-function scrollLimits() {
+function inkBox() {
+  if (!strokes.length) return null;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const s of strokes) {
     const b = s.bb || (current && current.s === s ? boxOf([s]) : (s.bb = boxOf([s])));
     x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
   }
-  if (!strokes.length) return { x0: 0, x1: 0, y0: 0, y1: 0 };
-  return { x0: Math.min(0, x0 - W * 0.7), x1: Math.max(0, x1 - W * 0.3), y0: Math.min(0, y0 - H * 0.7), y1: Math.max(0, y1 - H * 0.3) };
+  return { x0, y0, x1, y1 };
 }
-function setScroll(x, y, lim = scrollLimits()) {
-  scrollX = Math.max(lim.x0, Math.min(lim.x1, x)); scrollY = Math.max(lim.y0, Math.min(lim.y1, y));
-  $('pad').style.backgroundPosition = -scrollX + 'px ' + -scrollY + 'px';
+function setScroll(x, y, ink = inkBox()) {
+  const vw = W / zoom, vh = H / zoom;
+  if (!ink) { scrollX = 0; scrollY = 0; }
+  else {
+    scrollX = Math.max(Math.min(0, ink.x0 - vw * 0.7), Math.min(Math.max(0, ink.x1 - vw * 0.3), x));
+    scrollY = Math.max(Math.min(0, ink.y0 - vh * 0.7), Math.min(Math.max(0, ink.y1 - vh * 0.3), y));
+  }
+  const st = $('pad').style;
+  st.backgroundSize = 26 * zoom + 'px ' + 26 * zoom + 'px';
+  st.backgroundPosition = -scrollX * zoom + 'px ' + -scrollY * zoom + 'px';
   frame();
 }
-const fingerAt = () => { let x = 0, y = 0; for (const f of fingers.values()) { x += f.x; y += f.y; } return { x: x / fingers.size, y: y / fingers.size }; };
+// Zoom so that the page point under (cx, cy) on screen ends up under (nx, ny).
+function zoomAbout(z, cx, cy, nx, ny, ink) {
+  const r = canvas.getBoundingClientRect();
+  const wx = scrollX + (cx - r.left) / zoom, wy = scrollY + (cy - r.top) / zoom;
+  zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+  setScroll(wx - (nx - r.left) / zoom, wy - (ny - r.top) / zoom, ink);
+}
+// Where the fingers are: their middle point, and how far apart the first two are.
+const fingerAt = () => {
+  let x = 0, y = 0; const f = [...fingers.values()];
+  for (const q of f) { x += q.x; y += q.y; }
+  return { x: x / f.length, y: y / f.length, d: f.length > 1 ? Math.hypot(f[0].x - f[1].x, f[0].y - f[1].y) : 0 };
+};
 
 function resize() {
   const r = $('pad').getBoundingClientRect();
@@ -308,7 +345,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redraw);
 
 function pt(e) {
   const r = canvas.getBoundingClientRect();
-  return { x: e.clientX - r.left + scrollX, y: e.clientY - r.top + scrollY, p: e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5 };
+  return { x: (e.clientX - r.left) / zoom + scrollX, y: (e.clientY - r.top) / zoom + scrollY, p: e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5 };
 }
 let lastPen = -1e9;   // when the Pencil last touched the paper
 
@@ -331,13 +368,17 @@ canvas.addEventListener('pointerdown', e => {
     fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     const penBusy = (current && !current.touch) || action || performance.now() - lastPen < 300;   // a resting palm must not scroll
-    if (pan) pan.at = fingerAt();
+    if (pan) { pan.at = fingerAt(); if (!pan.moving) pan.from = pan.at; }
     else if (!penBusy && fingers.size >= (fingerOk ? 2 : 1)) {
       if (current) { strokes = history.pop(); current = null; redraw(); }   // a second finger landed: drop the mark the first one began
-      pan = { at: fingerAt(), from: fingerAt(), lim: scrollLimits(), moving: false };
+      pan = { at: fingerAt(), from: fingerAt(), ink: inkBox(), moving: false, t: performance.now(), back: { x: scrollX, y: scrollY, zoom } };
     }
     if (pan || !fingerOk) { e.preventDefault(); return; }   // Pencil only unless Finger is on
-  } else pan = null;
+  } else if (pan) {
+    // The Pencil is down, so that touch was the writing hand settling: put the page back where it was.
+    if (performance.now() - pan.t < 700) { zoom = pan.back.zoom; setScroll(pan.back.x, pan.back.y); }
+    pan = null; redraw();
+  }
   e.preventDefault();
   if (e.pointerType === 'pen') lastPen = performance.now();
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
@@ -345,16 +386,17 @@ canvas.addEventListener('pointerdown', e => {
   const p = pt(e);
   if (tool === 'pen') {
     remember(strokes.slice());
-    const s = { pts: [p], w: 1 };
-    strokes.push(s); current = { id: e.pointerId, s, touch: e.pointerType === 'touch' }; redraw();
+    const s = { pts: [p], w: 1 / zoom };                  // the pen looks the same thickness at any zoom
+    strokes.push(s); current = { id: e.pointerId, s, touch: e.pointerType === 'touch' };
+    paint(ctx, [s], dpr * zoom, inkColor(), scrollX, scrollY); $('hint').hidden = true;   // no full redraw, so a stroke starts instantly
     return;
   }
   if (tool === 'eraser') { action = { id: e.pointerId, kind: 'erase', before: strokes, last: p }; eraseAt(p); eraserPos = p; redraw(); return; }
   // Select: grab the resize handle, grab the selection to move it, or start circling something new.
   if (sel) {
     const b = sel.box;
-    const onHandle = Math.hypot(p.x - (b.x1 + BOX_PAD), p.y - (b.y1 + BOX_PAD)) < 26;
-    const inBox = p.x >= b.x0 - BOX_PAD && p.x <= b.x1 + BOX_PAD && p.y >= b.y0 - BOX_PAD && p.y <= b.y1 + BOX_PAD;
+    const onHandle = Math.hypot(p.x - (b.x1 + (BOX_PAD / zoom)), p.y - (b.y1 + (BOX_PAD / zoom))) < 26 / zoom;
+    const inBox = p.x >= b.x0 - (BOX_PAD / zoom) && p.x <= b.x1 + (BOX_PAD / zoom) && p.y >= b.y0 - (BOX_PAD / zoom) && p.y <= b.y1 + (BOX_PAD / zoom);
     if (onHandle || inBox) {
       drag = { mode: onHandle ? 'scale' : 'move', start: p, p: null, orig: strokes, ids: sel.ids, box: b };
       cache = { bg: layer(strokes.filter(s => !sel.ids.has(s))), fg: layer([...sel.ids]) };
@@ -370,8 +412,12 @@ canvas.addEventListener('pointermove', e => {
     if (pan) {
       e.preventDefault();
       const f = fingerAt();
-      if (!pan.moving && Math.hypot(f.x - pan.from.x, f.y - pan.from.y) < 8) return;   // ignore a hand that is only resting
-      pan.moving = true; setScroll(scrollX + pan.at.x - f.x, scrollY + pan.at.y - f.y, pan.lim); pan.at = f;
+      if (!pan.moving) {
+        if (Math.hypot(f.x - pan.from.x, f.y - pan.from.y) < 8 && Math.abs(f.d - pan.from.d) < 8) return;   // ignore a hand that is only resting
+        pan.moving = true; pan.at = f;                      // start from here, so the page doesn't jump
+      }
+      const z = f.d && pan.at.d ? zoom * f.d / pan.at.d : zoom;
+      zoomAbout(z, pan.at.x, pan.at.y, f.x, f.y, pan.ink); pan.at = f;
       return;
     }
   }
@@ -388,10 +434,10 @@ canvas.addEventListener('pointermove', e => {
     if (drawing) {
       const pts = current.s.pts, last = pts[pts.length - 1];
       pts.push(p);
-      paint(ctx, [{ pts: [last, p], w: 1 }], dpr, inkColor(), scrollX, scrollY);
+      paint(ctx, [{ pts: [last, p], w: current.s.w }], dpr * zoom, inkColor(), scrollX, scrollY);
     } else if (action.kind === 'erase') {
       // Step along the path so a fast swipe doesn't jump over thin strokes.
-      const a = action.last, n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y) / 6));
+      const a = action.last, n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y) * zoom / 6));
       for (let i = 1; i <= n; i++) eraseAt({ x: a.x + (p.x - a.x) * i / n, y: a.y + (p.y - a.y) * i / n });
       action.last = eraserPos = p;
     }
@@ -404,7 +450,7 @@ const end = e => {
   if (e.pointerType === 'pen') lastPen = performance.now();
   if (e.pointerType === 'touch') {
     fingers.delete(e.pointerId);
-    if (pan) { if (fingers.size) pan.at = fingerAt(); else pan = null; return; }
+    if (pan) { if (fingers.size) pan.at = fingerAt(); else { pan = null; redraw(); } return; }
   }
   if (current && e.pointerId === current.id) { current = null; return; }
   if (!action || e.pointerId !== action.id) return;
@@ -423,7 +469,10 @@ const end = e => {
   }
   action = null; cache = null; redraw();
 };
-canvas.addEventListener('wheel', e => { e.preventDefault(); if (!current && !action) setScroll(scrollX + e.deltaX, scrollY + e.deltaY); }, { passive: false });
+canvas.addEventListener('wheel', e => { e.preventDefault(); if (current || action) return;
+  if (e.ctrlKey) zoomAbout(zoom * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY, e.clientX, e.clientY);   // trackpad pinch
+  else setScroll(scrollX + e.deltaX / zoom, scrollY + e.deltaY / zoom);
+}, { passive: false });
 canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('lostpointercapture', end);
@@ -602,7 +651,7 @@ $('clear').onclick = () => {
     say('Deleted. Undo brings it back.');
     return;
   }
-  remember(strokes); strokes = []; sel = null; lasso = null; setScroll(0, 0); redraw();
+  remember(strokes); strokes = []; sel = null; lasso = null; zoom = 1; setScroll(0, 0); redraw();
   say('Cleared. Undo brings it back.');
 };
 document.addEventListener('gesturestart', e => e.preventDefault());

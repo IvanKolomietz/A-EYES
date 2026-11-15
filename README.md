@@ -13,7 +13,7 @@ When an AI tutor asks for your answer, typing fractions, exponents and integrals
 1. Open the link above in Safari on your iPad.
 2. Tap Share, then **Add to Home Screen**. It opens like an app from then on.
 3. Keep your notes app open and bring Answer Pad in as a Slide Over or small window.
-4. Write your answer with Apple Pencil. Need more room? Drag with a finger to move the page in any direction (two fingers when **Finger** is on).
+4. Write your answer with Apple Pencil. Need more room? Drag with a finger to move the page in any direction (two fingers when **Finger** is on), and pinch with two fingers to zoom in or out.
 5. Tap **Check**, pick your AI app (ChatGPT, Claude, Gemini and so on) from the share menu, and send.
 
 **Copy** puts the picture on the clipboard instead, for pasting into a chat by hand.
