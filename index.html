@@ -135,35 +135,58 @@ function css(name, fallback) { return getComputedStyle(document.documentElement)
 function inkColor() { return css('--ink', '#111'); }
 function remember(state) { history.push(state); if (history.length > 200) history.shift(); }
 
-// Every stroke is drawn as one continuous line of even thickness that curves through the
-// points the Pencil reported, so the writing has no joints or corners in it.
-function paint(g, list, scale, color, ox = 0, oy = 0) {
-  g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = g.fillStyle = color;
-  for (const s of list) {
-    const width = 2.6 * (s.w || 1) * scale, pts = s.pts, X = q => (q.x - ox) * scale, Y = q => (q.y - oy) * scale;
-    if (pts.length === 1) { g.beginPath(); g.arc(X(pts[0]), Y(pts[0]), width / 2, 0, 7); g.fill(); continue; }
-    g.lineWidth = width; g.beginPath(); g.moveTo(X(pts[0]), Y(pts[0]));
-    g.lineTo((X(pts[0]) + X(pts[1])) / 2, (Y(pts[0]) + Y(pts[1])) / 2);
-    for (let i = 2; i < pts.length; i++) {
-      const c = pts[i - 1], e = pts[i];
-      g.quadraticCurveTo(X(c), Y(c), (X(c) + X(e)) / 2, (Y(c) + Y(e)) / 2);
+// Every stroke is drawn as one solid shape that curves through the points the Pencil reported
+// and swells gradually with pressure, so the writing has no joints or sudden steps in it.
+// The shape is built once per stroke (in page positions) and reused for every later redraw.
+function halfWidth(s, pressure) { return 1.3 * (s.w || 1) * (0.5 + pressure); }
+function addDot(path, x, y, r) { path.moveTo(x + r, y); path.arc(x, y, r, 0, Math.PI * 2, true); path.closePath(); }
+// Adds the piece of stroke `s` that arrives at point `i`: a short curve between the midpoints
+// either side of the previous point. `tail` adds the last straight bit up to the final point.
+function addPiece(path, s, i, tail) {
+  const pts = s.pts, a = pts[i - 1], b = pts[i];
+  const mid = (u, v) => ({ x: (u.x + v.x) / 2, y: (u.y + v.y) / 2, p: (u.p + v.p) / 2 });
+  let from, to, c = null;
+  if (tail) { from = mid(a, b); to = b; }
+  else if (i === 1) { from = a; to = mid(a, b); }
+  else { from = mid(pts[i - 2], a); c = a; to = mid(a, b); }
+  const len = c ? Math.hypot(c.x - from.x, c.y - from.y) + Math.hypot(to.x - c.x, to.y - c.y) : Math.hypot(to.x - from.x, to.y - from.y);
+  const steps = Math.max(1, Math.min(10, Math.ceil(len / (3 * (s.w || 1)))));
+  let px = from.x, py = from.y, pr = halfWidth(s, from.p);
+  if (i === 1 && !tail) addDot(path, px, py, pr);
+  for (let k = 1; k <= steps; k++) {
+    const t = k / steps, u = 1 - t;
+    const x = c ? u * u * from.x + 2 * u * t * c.x + t * t * to.x : from.x + (to.x - from.x) * t;
+    const y = c ? u * u * from.y + 2 * u * t * c.y + t * t * to.y : from.y + (to.y - from.y) * t;
+    const r = halfWidth(s, from.p + (to.p - from.p) * t);
+    const dx = x - px, dy = y - py, d = Math.hypot(dx, dy);
+    if (d > 1e-6) {
+      const nx = -dy / d, ny = dx / d;
+      path.moveTo(px + nx * pr, py + ny * pr); path.lineTo(x + nx * r, y + ny * r);
+      path.lineTo(x - nx * r, y - ny * r); path.lineTo(px - nx * pr, py - ny * pr); path.closePath();
     }
-    g.lineTo(X(pts[pts.length - 1]), Y(pts[pts.length - 1]));
-    g.stroke();
+    addDot(path, x, y, r);
+    px = x; py = y; pr = r;
   }
 }
+function shapeOf(s) {
+  const path = new Path2D(), pts = s.pts;
+  if (pts.length === 1) { addDot(path, pts[0].x, pts[0].y, halfWidth(s, pts[0].p)); return path; }
+  for (let i = 1; i < pts.length; i++) addPiece(path, s, i, false);
+  addPiece(path, s, pts.length - 1, true);
+  return path;
+}
+function paint(g, list, scale, color, ox = 0, oy = 0) {
+  const live = current && current.s;
+  g.save(); g.setTransform(scale, 0, 0, scale, -ox * scale, -oy * scale); g.fillStyle = color;
+  for (const s of list) g.fill(s === live ? shapeOf(s) : (s.shape || (s.shape = shapeOf(s))));
+  g.restore();
+}
 // While a stroke is being written, only its newest piece is added to the screen. The pieces
-// are the same curves `paint` draws, so the stroke looks identical once it is finished.
-// `i` is the newest point; `tail` draws the last short piece up to the Pencil tip.
+// are the same ones `shapeOf` uses, so the stroke looks identical once it is finished.
 function paintPiece(s, i, tail) {
-  const Z = dpr * zoom, pts = s.pts, X = q => (q.x - scrollX) * Z, Y = q => (q.y - scrollY) * Z;
-  const mx = (a, b) => (X(a) + X(b)) / 2, my = (a, b) => (Y(a) + Y(b)) / 2;
-  ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = inkColor(); ctx.lineWidth = 2.6 * (s.w || 1) * Z;
-  ctx.beginPath();
-  if (tail) { ctx.moveTo(mx(pts[i - 1], pts[i]), my(pts[i - 1], pts[i])); ctx.lineTo(X(pts[i]), Y(pts[i])); }
-  else if (i === 1) { ctx.moveTo(X(pts[0]), Y(pts[0])); ctx.lineTo(mx(pts[0], pts[1]), my(pts[0], pts[1])); }
-  else { ctx.moveTo(mx(pts[i - 2], pts[i - 1]), my(pts[i - 2], pts[i - 1])); ctx.quadraticCurveTo(X(pts[i - 1]), Y(pts[i - 1]), mx(pts[i - 1], pts[i]), my(pts[i - 1], pts[i])); }
-  ctx.stroke();
+  const Z = dpr * zoom, path = new Path2D();
+  addPiece(path, s, i, tail);
+  ctx.save(); ctx.setTransform(Z, 0, 0, Z, -scrollX * Z, -scrollY * Z); ctx.fillStyle = inkColor(); ctx.fill(path); ctx.restore();
 }
 
 // The loop being drawn and the dashed box with its resize dot.
@@ -441,6 +464,7 @@ canvas.addEventListener('pointermove', e => {
     if (drawing) {
       const pts = current.s.pts, last = pts[pts.length - 1];
       if (Math.hypot(p.x - last.x, p.y - last.y) * zoom < 0.8) continue;   // skip points that haven't really moved; they only add wobble
+      p.p = last.p + (p.p - last.p) * 0.3;                 // ease pressure changes in, so the line swells gradually
       pts.push(p);
       paintPiece(current.s, pts.length - 1, false);
     } else if (action.kind === 'erase') {
