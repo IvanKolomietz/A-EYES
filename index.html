@@ -82,6 +82,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   <button id="undo">Undo</button>
   <button id="clear">Clear</button>
   <button id="finger" aria-pressed="false" title="Allow drawing with a finger">Finger</button>
+  <button id="lock" aria-pressed="false" title="Stop the page sliding left and right">Lock sides</button>
   <span class="spacer"></span>
   <button id="laptop" aria-pressed="false">Laptop</button>
   <button id="copy">Copy</button>
@@ -128,6 +129,8 @@ const BOX_PAD = 10, HANDLE = 9, ERASE_R = 13;
 // `scrollY` say where the visible part starts. A finger drag moves the page (two fingers when Finger is on).
 let scrollX = 0, scrollY = 0, zoom = 1, pan = null;   // two fingers pinch to zoom
 const ZOOM_MIN = 0.4, ZOOM_MAX = 4;
+let lockSides = false;   // when on, a finger moves the page up and down only
+try { lockSides = localStorage.getItem('answerpad-lock') === '1'; } catch (e) {}
 const fingers = new Map();
 let eraserPos = null;   // where the eraser is, so its circle can be shown
 
@@ -447,7 +450,7 @@ canvas.addEventListener('pointermove', e => {
         pan.moving = true; pan.at = f;                      // start from here, so the page doesn't jump
       }
       const z = f.d && pan.at.d ? zoom * f.d / pan.at.d : zoom;
-      zoomAbout(z, pan.at.x, pan.at.y, f.x, f.y, pan.ink); pan.at = f;
+      zoomAbout(z, pan.at.x, pan.at.y, lockSides ? pan.at.x : f.x, f.y, pan.ink); pan.at = f;
       return;
     }
   }
@@ -507,7 +510,7 @@ const end = e => {
 };
 canvas.addEventListener('wheel', e => { e.preventDefault(); if (current || action) return;
   if (e.ctrlKey) zoomAbout(zoom * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY, e.clientX, e.clientY);   // trackpad pinch
-  else setScroll(scrollX + e.deltaX / zoom, scrollY + e.deltaY / zoom);
+  else setScroll(scrollX + (lockSides ? 0 : e.deltaX / zoom), scrollY + e.deltaY / zoom);
 }, { passive: false });
 canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
@@ -676,6 +679,13 @@ function setTool(t) {
 $('eraser').onclick = () => setTool('eraser');
 $('select').onclick = () => setTool('select');
 $('finger').onclick = () => { fingerOk = !fingerOk; $('finger').classList.toggle('on', fingerOk); $('finger').setAttribute('aria-pressed', fingerOk); };
+function showLock() { $('lock').classList.toggle('on', lockSides); $('lock').setAttribute('aria-pressed', lockSides); }
+$('lock').onclick = () => {
+  lockSides = !lockSides; showLock();
+  try { localStorage.setItem('answerpad-lock', lockSides ? '1' : '0'); } catch (e) {}
+  say(lockSides ? 'The page now only moves up and down.' : 'The page moves in every direction again.');
+};
+showLock();
 $('undo').onclick = () => {
   if (!history.length) { say('Nothing to undo'); return; }
   strokes = history.pop(); sel = null; lasso = null; setScroll(scrollX, scrollY); redraw();

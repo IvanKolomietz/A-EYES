@@ -40,6 +40,7 @@ To go back to the share menu, tap **Laptop**, then **Stop sending to laptop**.
 | Undo | Takes back the last thing you did, including an erase, a move, a resize, or a Clear |
 | Clear | Wipes the pad. Undo brings it back |
 | Finger | Lets you draw with a finger. Off by default, so a resting palm never draws |
+| Lock sides | Stops the page sliding left and right, so a finger only moves it up and down. Your choice is remembered |
 | Laptop | Pairs the pad with a laptop so answers are sent there |
 | Copy | Copies your answer as an image |
 | Check | Sends your answer to an AI app through the share menu. Reads **Send** when paired with a laptop |
