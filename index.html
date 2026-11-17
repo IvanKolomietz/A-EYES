@@ -59,6 +59,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button.on { background: var(--fg); color: var(--panel); border-color: var(--fg); }
 button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; padding: 9px 18px; }
 [hidden] { display: none !important; }
+.show { position: absolute; z-index: 1; top: 8px; right: 8px; padding: 6px 10px; font-size: 13px; opacity: .8; }
 .sheet {
   position: absolute; z-index: 2; top: 8px; left: 8px; right: 8px; max-width: 380px; margin: 0 auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
@@ -84,17 +85,19 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   <button id="clear">Clear</button>
   <button id="finger" aria-pressed="false" title="Allow drawing with a finger">Finger</button>
   <button id="lock" aria-pressed="false" title="Stop the page sliding left and right">Lock sides</button>
+  <button id="hide" title="Hide all the buttons to leave more room for writing">Hide</button>
   <span class="spacer"></span>
   <button id="laptop" aria-pressed="false">Laptop</button>
   <button id="copy">Copy</button>
   <button id="check" class="primary">Check</button>
 </div>
-<div class="bar sizes">
+<div class="bar sizes" id="sizes">
   <label>Pen <input id="pensize" type="range" min="0.4" max="3" step="0.1" value="1" aria-label="Pen thickness"></label>
   <label>Eraser <input id="erasersize" type="range" min="5" max="45" step="1" value="13" aria-label="Eraser size"></label>
 </div>
 <div class="pad" id="pad">
   <canvas id="c"></canvas>
+  <button id="show" class="show" hidden title="Bring the buttons back">Menu</button>
   <div class="hint" id="hint">Write your answer with Apple Pencil, then tap Check and pick your AI app. Drag with a finger to move the page, and pinch with two fingers to zoom.</div>
   <div class="status" id="status" role="status"></div>
   <div class="sheet" id="sheet" hidden>
@@ -195,12 +198,32 @@ function paint(g, list, scale, color, ox = 0, oy = 0) {
   for (const s of list) g.fill(s === live ? shapeOf(s) : (s.shape || (s.shape = shapeOf(s))));
   g.restore();
 }
-// While a stroke is being written, only its newest piece is added to the screen. The pieces
-// are the same ones `shapeOf` uses, so the stroke looks identical once it is finished.
-function paintPiece(s, i, tail) {
-  const Z = dpr * zoom, path = new Path2D();
-  addPiece(path, s, i, tail);
+// While a stroke is being written it is redrawn whole each time it grows: the page underneath
+// (kept as a picture in `under`) is put back, then the stroke so far is filled as ONE shape.
+// Nothing is ever added piece by piece, so no joins can show along the line.
+let under = null;
+function grabUnder() {
+  if (!under || under.width !== canvas.width || under.height !== canvas.height) {
+    under = document.createElement('canvas'); under.width = canvas.width; under.height = canvas.height;
+  }
+  const g = under.getContext('2d');
+  g.globalCompositeOperation = 'copy'; g.drawImage(canvas, 0, 0);
+}
+function extend(c, p) {
+  const pts = c.s.pts; pts.push(p);
+  addPiece(c.path, c.s, pts.length - 1, false);
+  const b = c.box; b.x0 = Math.min(b.x0, p.x); b.y0 = Math.min(b.y0, p.y); b.x1 = Math.max(b.x1, p.x); b.y1 = Math.max(b.y1, p.y);
+}
+function drawStroke() {
+  const c = current, s = c.s, pts = s.pts, Z = dpr * zoom, b = c.box, m = 2 * (s.w || 1) + 2 / Z;
+  const x0 = Math.max(0, Math.floor((b.x0 - m - scrollX) * Z)), y0 = Math.max(0, Math.floor((b.y0 - m - scrollY) * Z));
+  const x1 = Math.min(canvas.width, Math.ceil((b.x1 + m - scrollX) * Z)), y1 = Math.min(canvas.height, Math.ceil((b.y1 + m - scrollY) * Z));
+  if (under && x1 > x0 && y1 > y0) { ctx.clearRect(x0, y0, x1 - x0, y1 - y0); ctx.drawImage(under, x0, y0, x1 - x0, y1 - y0, x0, y0, x1 - x0, y1 - y0); }
+  let path;
+  if (pts.length === 1) { path = new Path2D(); addDot(path, pts[0].x, pts[0].y, halfWidth(s, pts[0].p)); }
+  else { path = new Path2D(c.path); addPiece(path, s, pts.length - 1, true); }
   ctx.save(); ctx.setTransform(Z, 0, 0, Z, -scrollX * Z, -scrollY * Z); ctx.fillStyle = inkColor(); ctx.fill(path); ctx.restore();
+  return path;
 }
 
 // The loop being drawn and the dashed box with its resize dot.
@@ -234,7 +257,7 @@ function redraw() {
   // Only writing that is on screen is drawn.
   const vw = W / zoom, vh = H / zoom, live = current && current.s;
   const seen = strokes.filter(s => {
-    if (s === live) return true;
+    if (s === live) return false;                        // the stroke being written is drawn last, on its own
     const b = s.bb || (s.bb = boxOf([s])), m = 4 * (s.w || 1);
     return b.x1 + m >= scrollX && b.x0 - m <= scrollX + vw && b.y1 + m >= scrollY && b.y0 - m <= scrollY + vh;
   });
@@ -259,6 +282,7 @@ function redraw() {
     }
     ctx.restore();
   }
+  if (current) { grabUnder(); drawStroke(); }
   $('hint').hidden = strokes.length > 0;
   const label = sel ? 'Delete' : 'Clear';              // with writing selected, Clear removes just that
   if ($('clear').textContent !== label) $('clear').textContent = label;
@@ -412,20 +436,24 @@ function pt(e) {
   return { x: (e.clientX - r.left) / zoom + scrollX, y: (e.clientY - r.top) / zoom + scrollY, p: e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5 };
 }
 let lastPen = -1e9;   // when the Pencil last touched the paper
+let dropped = null;   // a stroke the system cancelled mid-line, in case the Pencil carries straight on
+let lastTap = null;   // the last quick tap of the Pencil tip, to spot a double tap
 
 // Stop Safari's own touch gestures (scroll bounce, double-tap zoom, long-press) from
 // starting under a resting palm: when one of those starts, it cuts the Pencil stroke off.
 for (const type of ['touchstart', 'touchmove', 'touchend']) {
   canvas.addEventListener(type, e => e.preventDefault(), { passive: false });
 }
-const inUi = e => !!(e.target.closest && e.target.closest('.bar, .sheet'));
+const inUi = e => !!(e.target.closest && e.target.closest('.bar, .sheet, .show'));
 document.addEventListener('touchmove', e => { if (!inUi(e)) e.preventDefault(); }, { passive: false });
 for (const type of ['contextmenu', 'selectstart', 'dblclick']) document.addEventListener(type, e => { if (!inUi(e)) e.preventDefault(); });
 
 // Ignore button presses made by a hand while the Pencil is writing or has just lifted.
 let blockTap = false;
-$('bar').addEventListener('pointerdown', e => { blockTap = e.pointerType === 'touch' && (current !== null || action !== null || performance.now() - lastPen < 800); }, true);
-$('bar').addEventListener('click', e => { if (blockTap) { e.stopPropagation(); e.preventDefault(); blockTap = false; } }, true);
+for (const el of [$('bar'), $('show')]) {
+  el.addEventListener('pointerdown', e => { blockTap = e.pointerType === 'touch' && (current !== null || action !== null || performance.now() - lastPen < 800); }, true);
+  el.addEventListener('click', e => { if (blockTap) { e.stopPropagation(); e.preventDefault(); blockTap = false; } }, true);
+}
 
 canvas.addEventListener('pointerdown', e => {
   if (e.pointerType === 'touch') {
@@ -453,10 +481,24 @@ canvas.addEventListener('pointerdown', e => {
   if (current || action) return;                         // one gesture at a time
   const p = pt(e);
   if (tool === 'pen') {
+    const now = performance.now(), d = dropped; dropped = null;
+    if (d && now - d.t < 200 && strokes[strokes.length - 1] === d.c.s) {
+      // The system cut the last stroke off mid-line and the Pencil is still going: carry on with
+      // the same stroke instead of starting a new little one.
+      const last = d.c.s.pts[d.c.s.pts.length - 1];
+      if (Math.hypot(p.x - last.x, p.y - last.y) * zoom < 16) {
+        current = d.c; current.id = e.pointerId; delete current.s.shape; delete current.s.bb;
+        p.p = last.p; extend(current, p); redraw();
+        return;
+      }
+    }
     remember(strokes.slice());
     const s = { pts: [p], w: penW / zoom };               // the pen looks the same thickness at any zoom
-    strokes.push(s); current = { id: e.pointerId, s, touch: e.pointerType === 'touch' };
-    paint(ctx, [s], dpr * zoom, inkColor(), scrollX, scrollY); $('hint').hidden = true;   // no full redraw, so a stroke starts instantly
+    strokes.push(s);
+    current = { id: e.pointerId, s, touch: e.pointerType === 'touch', path: new Path2D(), box: { x0: p.x, y0: p.y, x1: p.x, y1: p.y }, t0: now, sx: e.clientX, sy: e.clientY, far: 0 };
+    $('hint').hidden = true;
+    if (sizeHint) { sizeHint = null; redraw(); }          // redraw also draws the new stroke
+    else { grabUnder(); drawStroke(); }                   // no full redraw, so a stroke starts instantly
     return;
   }
   if (tool === 'eraser') { action = { id: e.pointerId, kind: 'erase', before: strokes, last: p }; eraseAt(p); eraserPos = p; redraw(); return; }
@@ -507,8 +549,7 @@ canvas.addEventListener('pointermove', e => {
       p.x = last.x + (p.x - last.x) * 0.5; p.y = last.y + (p.y - last.y) * 0.5;
       if (Math.hypot(p.x - last.x, p.y - last.y) * zoom < 0.8) continue;   // skip points that haven't really moved; they only add wobble
       p.p = last.p + (p.p - last.p) * 0.2;                 // ease pressure changes in, so the line swells gradually
-      pts.push(p);
-      paintPiece(current.s, pts.length - 1, false);
+      extend(current, p);
     } else if (action.kind === 'erase') {
       // Step along the path so a fast swipe doesn't jump over thin strokes.
       const a = action.last, n = Math.max(1, Math.ceil(Math.hypot(p.x - a.x, p.y - a.y) * zoom / 6));
@@ -518,6 +559,7 @@ canvas.addEventListener('pointermove', e => {
     else if (action.kind === 'lasso') lasso.push(p);
     else drag.p = p;
   }
+  if (drawing) { current.far = Math.max(current.far, Math.hypot(e.clientX - current.sx, e.clientY - current.sy)); drawStroke(); }
   if (acting) frame();
 });
 const end = e => {
@@ -527,12 +569,22 @@ const end = e => {
     if (pan) { if (fingers.size) pan.at = fingerAt(); else { pan = null; redraw(); } return; }
   }
   if (current && e.pointerId === current.id) {
-    const pts = current.s.pts, last = pts[pts.length - 1], raw = current.raw;
-    if (raw && Math.hypot(raw.x - last.x, raw.y - last.y) * zoom > 0.5) {   // finish exactly where the Pencil lifted
-      pts.push({ x: raw.x, y: raw.y, p: last.p }); paintPiece(current.s, pts.length - 1, false);
+    const c = current, pts = c.s.pts, last = pts[pts.length - 1], raw = c.raw, now = performance.now();
+    if (e.type === 'pointercancel' && !c.touch) {          // cut off by the system, not lifted: see pointerdown
+      c.s.shape = drawStroke(); current = null; dropped = { c, t: now }; return;
     }
-    if (pts.length > 1) paintPiece(current.s, pts.length - 1, true);
-    current = null; return;
+    if (raw && Math.hypot(raw.x - last.x, raw.y - last.y) * zoom > 0.5) extend(c, { x: raw.x, y: raw.y, p: last.p });   // finish exactly where the Pencil lifted
+    c.s.shape = drawStroke(); c.s.bb = c.box;
+    current = null;
+    // Two quick taps of the Pencil tip on the same spot switch to the eraser. The two dots
+    // the taps left are taken away again.
+    if (!c.touch && now - c.t0 < 250 && c.far < 6) {
+      if (lastTap && now - lastTap.t < 400 && Math.hypot(c.sx - lastTap.x, c.sy - lastTap.y) < 12 && strokes[strokes.length - 2] === lastTap.s) {
+        history.pop(); strokes = history.pop(); lastTap = null;
+        setTool('eraser'); say('Eraser. It goes back to the pen after you erase.');
+      } else lastTap = { t: now, x: c.sx, y: c.sy, s: c.s };
+    } else lastTap = null;
+    return;
   }
   if (!action || e.pointerId !== action.id) return;
   if (action.kind === 'erase') {
@@ -728,6 +780,17 @@ $('lock').onclick = () => {
   say(lockSides ? 'The page now only moves up and down.' : 'The page moves in every direction again.');
 };
 showLock();
+// Hide tucks every button away so the whole window is paper; a small Menu button brings them back.
+let menuHidden = false;
+try { menuHidden = localStorage.getItem('answerpad-hide') === '1'; } catch (e) {}
+function showMenu() { $('bar').hidden = $('sizes').hidden = menuHidden; $('show').hidden = !menuHidden; }
+function setMenu(hidden) {
+  menuHidden = hidden; showMenu();
+  try { localStorage.setItem('answerpad-hide', hidden ? '1' : '0'); } catch (e) {}
+}
+$('hide').onclick = () => { setMenu(true); say('Buttons hidden. Tap Menu to bring them back. Double-tap the Pencil tip for the eraser.', 4500); };
+$('show').onclick = () => setMenu(false);
+showMenu();
 $('pensize').value = penW; $('erasersize').value = eraseR;
 function sized(kind) {
   sizeHint = kind; redraw();

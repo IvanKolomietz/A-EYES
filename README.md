@@ -35,13 +35,14 @@ To go back to the share menu, tap **Laptop**, then **Stop sending to laptop**.
 
 | Button | What it does |
 | --- | --- |
-| Eraser | Rubs out whatever you drag over; a circle shows where it is. It switches back to the pen when you lift the Pencil |
+| Eraser | Rubs out whatever you drag over; a circle shows where it is. It switches back to the pen when you lift the Pencil. You can also get the eraser by tapping the Pencil tip twice quickly on the same spot |
 | Select | Circle some writing, then drag it to move it, or drag the dot at its corner to resize it. While something is selected, the Clear button reads **Delete** and removes just that. Tap Select again to go back to the pen |
 | Undo | Takes back the last thing you did, including an erase, a move, a resize, or a Clear |
 | Clear | Wipes the pad. Undo brings it back |
 | Finger | Lets you draw with a finger. Off by default, so a resting palm never draws |
 | Lock sides | Stops the page sliding left and right, so a finger only moves it up and down. Your choice is remembered |
 | Pen and Eraser sliders | Set how thick the pen writes and how big the eraser is. A preview shows in the middle of the page while you slide, and your choice is remembered |
+| Hide | Tucks all the buttons away so the whole window is paper. Tap the small **Menu** button in the corner to bring them back |
 | Laptop | Pairs the pad with a laptop so answers are sent there |
 | Copy | Copies your answer as an image |
 | Check | Sends your answer to an AI app through the share menu. Reads **Send** when paired with a laptop |
