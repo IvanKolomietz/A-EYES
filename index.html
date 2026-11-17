@@ -36,9 +36,10 @@ body {
 .pad {
   position: relative; flex: 1 1 auto; min-height: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
   background-color: var(--paper);
-  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 26px 26px;
 }
+.sizes { gap: 6px 16px; font-size: 13px; color: var(--muted); }
+.sizes label { flex: 1 1 150px; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.sizes input { flex: 1 1 auto; min-width: 0; height: 28px; margin: 0; accent-color: var(--accent); }
 canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
 .hint { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 0 20px; color: var(--muted); pointer-events: none; }
 .status {
@@ -88,6 +89,10 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
   <button id="copy">Copy</button>
   <button id="check" class="primary">Check</button>
 </div>
+<div class="bar sizes">
+  <label>Pen <input id="pensize" type="range" min="0.4" max="3" step="0.1" value="1" aria-label="Pen thickness"></label>
+  <label>Eraser <input id="erasersize" type="range" min="5" max="45" step="1" value="13" aria-label="Eraser size"></label>
+</div>
 <div class="pad" id="pad">
   <canvas id="c"></canvas>
   <div class="hint" id="hint">Write your answer with Apple Pencil, then tap Check and pick your AI app. Drag with a finger to move the page, and pinch with two fingers to zoom.</div>
@@ -124,7 +129,13 @@ let sel = null;       // {ids: Set of strokes, box}: the current selection
 let lasso = null;     // points of the loop being drawn
 let drag = null;      // {mode: 'move' | 'scale', start, orig, ids, box}
 let dpr = 1, W = 0, H = 0, statusTimer = null;
-const BOX_PAD = 10, HANDLE = 9, ERASE_R = 13;
+const BOX_PAD = 10, HANDLE = 9, GRID = 26;
+// Pen thickness and eraser size are set with the two sliders and remembered.
+let penW = 1, eraseR = 13, sizeHint = null, sizeTimer = null;
+try {
+  penW = Math.max(0.4, Math.min(3, parseFloat(localStorage.getItem('answerpad-pen')) || 1));
+  eraseR = Math.max(5, Math.min(45, parseFloat(localStorage.getItem('answerpad-eraser')) || 13));
+} catch (e) {}
 // The page is bigger than the screen: strokes are stored in page positions, and `scrollX` and
 // `scrollY` say where the visible part starts. A finger drag moves the page (two fingers when Finger is on).
 let scrollX = 0, scrollY = 0, zoom = 1, pan = null;   // two fingers pinch to zoom
@@ -141,7 +152,7 @@ function remember(state) { history.push(state); if (history.length > 200) histor
 // Every stroke is drawn as one solid shape that curves through the points the Pencil reported
 // and swells gradually with pressure, so the writing has no joints or sudden steps in it.
 // The shape is built once per stroke (in page positions) and reused for every later redraw.
-function halfWidth(s, pressure) { return 1.3 * (s.w || 1) * (0.5 + pressure); }
+function halfWidth(s, pressure) { return 1.3 * (s.w || 1) * (0.7 + 0.6 * pressure); }
 function addDot(path, x, y, r) { path.moveTo(x + r, y); path.arc(x, y, r, 0, Math.PI * 2, true); path.closePath(); }
 // Adds the piece of stroke `s` that arrives at point `i`: a short curve between the midpoints
 // either side of the previous point. `tail` adds the last straight bit up to the final point.
@@ -209,8 +220,17 @@ function overlay(b) {
   ctx.restore();
 }
 
+// The grid is drawn on the same canvas and in the same pass as the writing, so the two can
+// never be a frame apart while the page is moved or zoomed.
+function drawGrid() {
+  const Z = dpr * zoom, line = Math.max(1, Math.round(dpr));
+  ctx.fillStyle = css('--grid', '#e2e9e6');
+  for (let x = Math.ceil(scrollX / GRID) * GRID, sx; (sx = (x - scrollX) * Z) < canvas.width; x += GRID) ctx.fillRect(Math.round(sx), 0, line, canvas.height);
+  for (let y = Math.ceil(scrollY / GRID) * GRID, sy; (sy = (y - scrollY) * Z) < canvas.height; y += GRID) ctx.fillRect(0, Math.round(sy), canvas.width, line);
+}
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawGrid();
   // Only writing that is on screen is drawn.
   const vw = W / zoom, vh = H / zoom, live = current && current.s;
   const seen = strokes.filter(s => {
@@ -222,9 +242,21 @@ function redraw() {
   overlay(sel && sel.box);
   if (eraserPos && tool === 'eraser') {
     ctx.save(); ctx.scale(dpr * zoom, dpr * zoom); ctx.translate(-scrollX, -scrollY);
-    ctx.beginPath(); ctx.arc(eraserPos.x, eraserPos.y, ERASE_R / zoom, 0, 7);
+    ctx.beginPath(); ctx.arc(eraserPos.x, eraserPos.y, eraseR / zoom, 0, 7);
     ctx.globalAlpha = 0.18; ctx.fillStyle = css('--muted', '#777'); ctx.fill();
     ctx.globalAlpha = 1; ctx.lineWidth = 1.5 / zoom; ctx.strokeStyle = css('--fg', '#222'); ctx.stroke();
+    ctx.restore();
+  }
+  if (sizeHint) {
+    // While a slider is being moved, show the size it gives in the middle of the page.
+    const cx = canvas.width / 2, cy = canvas.height / 2;
+    ctx.save(); ctx.beginPath();
+    if (sizeHint === 'pen') { ctx.arc(cx, cy, 1.3 * penW * dpr, 0, 7); ctx.fillStyle = inkColor(); ctx.fill(); }
+    else {
+      ctx.arc(cx, cy, eraseR * dpr, 0, 7);
+      ctx.globalAlpha = 0.18; ctx.fillStyle = css('--muted', '#777'); ctx.fill();
+      ctx.globalAlpha = 1; ctx.lineWidth = 1.5 * dpr; ctx.strokeStyle = css('--fg', '#222'); ctx.stroke();
+    }
     ctx.restore();
   }
   $('hint').hidden = strokes.length > 0;
@@ -248,6 +280,7 @@ function frame() {
 function drawLive() {
   if (!cache) { redraw(); return; }
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawGrid();
   ctx.drawImage(cache.bg, 0, 0);
   let box = null;
   if (drag) {
@@ -285,7 +318,7 @@ function segDist(p, a, b) {
 // Only strokes whose bounding box is near the eraser are looked at, and the screen is
 // refreshed once per frame by the caller, so long erasing sessions stay quick.
 function eraseAt(p) {
-  const R = ERASE_R / zoom, out = [];
+  const R = eraseR / zoom, out = [];
   let changed = false;
   for (const s of strokes) {
     const bb = s.bb || (s.bb = boxOf([s]));
@@ -328,8 +361,8 @@ function commitDrag() {
   remember(drag.orig);
 }
 
-// The page can be moved in any direction until the writing is about to leave the screen,
-// which always leaves most of a screen of empty space on the side you are heading to.
+// The page can be moved in any direction as long as a little of the writing stays on screen.
+// The limit is kept loose so that it doesn't tug the page sideways in the middle of a pinch.
 function inkBox() {
   if (!strokes.length) return null;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -343,12 +376,10 @@ function setScroll(x, y, ink = inkBox()) {
   const vw = W / zoom, vh = H / zoom;
   if (!ink) { scrollX = 0; scrollY = 0; }
   else {
-    scrollX = Math.max(Math.min(0, ink.x0 - vw * 0.7), Math.min(Math.max(0, ink.x1 - vw * 0.3), x));
-    scrollY = Math.max(Math.min(0, ink.y0 - vh * 0.7), Math.min(Math.max(0, ink.y1 - vh * 0.3), y));
+    const mx = Math.min(60 / zoom, vw * 0.3), my = Math.min(60 / zoom, vh * 0.3);
+    scrollX = Math.max(Math.min(0, ink.x0 - vw + mx), Math.min(Math.max(0, ink.x1 - mx), x));
+    scrollY = Math.max(Math.min(0, ink.y0 - vh + my), Math.min(Math.max(0, ink.y1 - my), y));
   }
-  const st = $('pad').style;
-  st.backgroundSize = 26 * zoom + 'px ' + 26 * zoom + 'px';
-  st.backgroundPosition = -scrollX * zoom + 'px ' + -scrollY * zoom + 'px';
   frame();
 }
 // Zoom so that the page point under (cx, cy) on screen ends up under (nx, ny).
@@ -398,9 +429,13 @@ $('bar').addEventListener('click', e => { if (blockTap) { e.stopPropagation(); e
 
 canvas.addEventListener('pointerdown', e => {
   if (e.pointerType === 'touch') {
-    fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     const penBusy = (current && !current.touch) || action || performance.now() - lastPen < 300;   // a resting palm must not scroll
+    // A touch that lands while the Pencil is at work is the writing hand. It is left out for
+    // good, so it can't later be mistaken for one of two pinching fingers.
+    if (!penBusy || pan) {
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    }
     if (pan) { pan.at = fingerAt(); if (!pan.moving) pan.from = pan.at; }
     else if (!penBusy && fingers.size >= (fingerOk ? 2 : 1)) {
       if (current) { strokes = history.pop(); current = null; redraw(); }   // a second finger landed: drop the mark the first one began
@@ -419,7 +454,7 @@ canvas.addEventListener('pointerdown', e => {
   const p = pt(e);
   if (tool === 'pen') {
     remember(strokes.slice());
-    const s = { pts: [p], w: 1 / zoom };                  // the pen looks the same thickness at any zoom
+    const s = { pts: [p], w: penW / zoom };               // the pen looks the same thickness at any zoom
     strokes.push(s); current = { id: e.pointerId, s, touch: e.pointerType === 'touch' };
     paint(ctx, [s], dpr * zoom, inkColor(), scrollX, scrollY); $('hint').hidden = true;   // no full redraw, so a stroke starts instantly
     return;
@@ -466,8 +501,12 @@ canvas.addEventListener('pointermove', e => {
     const p = pt(ev);
     if (drawing) {
       const pts = current.s.pts, last = pts[pts.length - 1];
+      current.raw = { x: p.x, y: p.y };
+      // Follow the Pencil half-way each time rather than jumping to it. That irons out the
+      // small shakes in the reported positions; the line catches up when the Pencil lifts.
+      p.x = last.x + (p.x - last.x) * 0.5; p.y = last.y + (p.y - last.y) * 0.5;
       if (Math.hypot(p.x - last.x, p.y - last.y) * zoom < 0.8) continue;   // skip points that haven't really moved; they only add wobble
-      p.p = last.p + (p.p - last.p) * 0.3;                 // ease pressure changes in, so the line swells gradually
+      p.p = last.p + (p.p - last.p) * 0.2;                 // ease pressure changes in, so the line swells gradually
       pts.push(p);
       paintPiece(current.s, pts.length - 1, false);
     } else if (action.kind === 'erase') {
@@ -488,7 +527,10 @@ const end = e => {
     if (pan) { if (fingers.size) pan.at = fingerAt(); else { pan = null; redraw(); } return; }
   }
   if (current && e.pointerId === current.id) {
-    const pts = current.s.pts;
+    const pts = current.s.pts, last = pts[pts.length - 1], raw = current.raw;
+    if (raw && Math.hypot(raw.x - last.x, raw.y - last.y) * zoom > 0.5) {   // finish exactly where the Pencil lifted
+      pts.push({ x: raw.x, y: raw.y, p: last.p }); paintPiece(current.s, pts.length - 1, false);
+    }
     if (pts.length > 1) paintPiece(current.s, pts.length - 1, true);
     current = null; return;
   }
@@ -686,6 +728,19 @@ $('lock').onclick = () => {
   say(lockSides ? 'The page now only moves up and down.' : 'The page moves in every direction again.');
 };
 showLock();
+$('pensize').value = penW; $('erasersize').value = eraseR;
+function sized(kind) {
+  sizeHint = kind; redraw();
+  clearTimeout(sizeTimer); sizeTimer = setTimeout(() => { sizeHint = null; redraw(); }, 900);
+}
+$('pensize').oninput = e => {
+  penW = +e.target.value; try { localStorage.setItem('answerpad-pen', penW); } catch (err) {}
+  sized('pen');
+};
+$('erasersize').oninput = e => {
+  eraseR = +e.target.value; try { localStorage.setItem('answerpad-eraser', eraseR); } catch (err) {}
+  sized('eraser');
+};
 $('undo').onclick = () => {
   if (!history.length) { say('Nothing to undo'); return; }
   strokes = history.pop(); sel = null; lasso = null; setScroll(scrollX, scrollY); redraw();

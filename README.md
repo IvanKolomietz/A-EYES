@@ -41,6 +41,7 @@ To go back to the share menu, tap **Laptop**, then **Stop sending to laptop**.
 | Clear | Wipes the pad. Undo brings it back |
 | Finger | Lets you draw with a finger. Off by default, so a resting palm never draws |
 | Lock sides | Stops the page sliding left and right, so a finger only moves it up and down. Your choice is remembered |
+| Pen and Eraser sliders | Set how thick the pen writes and how big the eraser is. A preview shows in the middle of the page while you slide, and your choice is remembered |
 | Laptop | Pairs the pad with a laptop so answers are sent there |
 | Copy | Copies your answer as an image |
 | Check | Sends your answer to an AI app through the share menu. Reads **Send** when paired with a laptop |
