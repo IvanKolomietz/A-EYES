@@ -476,6 +476,12 @@ canvas.addEventListener('pointerdown', e => {
     pan = null; redraw();
   }
   e.preventDefault();
+  // There is only one Pencil, so a new Pencil (or mouse) touch means the last one has lifted,
+  // even if iPadOS never told us. Finish that gesture now instead of waiting for it forever.
+  if (e.pointerType !== 'touch') {
+    if (current && !current.touch && current.id !== e.pointerId) end({ type: 'pointerup', pointerType: 'pen', pointerId: current.id });
+    if (action && action.id !== e.pointerId && action.type !== 'touch') end({ type: 'pointerup', pointerType: 'pen', pointerId: action.id });
+  }
   if (e.pointerType === 'pen') lastPen = performance.now();
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   if (current || action) return;                         // one gesture at a time
@@ -501,7 +507,7 @@ canvas.addEventListener('pointerdown', e => {
     else { grabUnder(); drawStroke(); }                   // no full redraw, so a stroke starts instantly
     return;
   }
-  if (tool === 'eraser') { action = { id: e.pointerId, kind: 'erase', before: strokes, last: p }; eraseAt(p); eraserPos = p; redraw(); return; }
+  if (tool === 'eraser') { action = { id: e.pointerId, type: e.pointerType, kind: 'erase', before: strokes, last: p }; eraseAt(p); eraserPos = p; redraw(); return; }
   // Select: grab the resize handle, grab the selection to move it, or start circling something new.
   if (sel) {
     const b = sel.box;
@@ -510,11 +516,11 @@ canvas.addEventListener('pointerdown', e => {
     if (onHandle || inBox) {
       drag = { mode: onHandle ? 'scale' : 'move', start: p, p: null, orig: strokes, ids: sel.ids, box: b };
       cache = { bg: layer(strokes.filter(s => !sel.ids.has(s))), fg: layer([...sel.ids]) };
-      action = { id: e.pointerId, kind: 'drag' };
+      action = { id: e.pointerId, type: e.pointerType, kind: 'drag' };
       return;
     }
   }
-  sel = null; lasso = [p]; cache = { bg: layer(strokes) }; action = { id: e.pointerId, kind: 'lasso' }; frame();
+  sel = null; lasso = [p]; cache = { bg: layer(strokes) }; action = { id: e.pointerId, type: e.pointerType, kind: 'lasso' }; frame();
 });
 canvas.addEventListener('pointermove', e => {
   if (e.pointerType === 'touch' && fingers.has(e.pointerId)) {
@@ -562,7 +568,7 @@ canvas.addEventListener('pointermove', e => {
   if (drawing) { current.far = Math.max(current.far, Math.hypot(e.clientX - current.sx, e.clientY - current.sy)); drawStroke(); }
   if (acting) frame();
 });
-const end = e => {
+function end(e) {
   if (e.pointerType === 'pen') lastPen = performance.now();
   if (e.pointerType === 'touch') {
     fingers.delete(e.pointerId);
@@ -601,12 +607,19 @@ const end = e => {
     drag = null;
   }
   action = null; cache = null; redraw();
-};
+}
 canvas.addEventListener('wheel', e => { e.preventDefault(); if (current || action) return;
   if (e.ctrlKey) zoomAbout(zoom * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY, e.clientX, e.clientY);   // trackpad pinch
   else setScroll(scrollX + (lockSides ? 0 : e.deltaX / zoom), scrollY + e.deltaY / zoom);
 }, { passive: false });
 canvas.addEventListener('pointerup', end);
+function resetGestures() {
+  if (current) end({ type: 'pointerup', pointerType: current.touch ? 'mouse' : 'pen', pointerId: current.id });
+  if (action) end({ type: 'pointerup', pointerType: 'pen', pointerId: action.id });
+  fingers.clear(); pan = null; dropped = null;
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) resetGestures(); });
+addEventListener('blur', resetGestures);
 canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('lostpointercapture', end);
 canvas.addEventListener('pointerleave', () => { if (eraserPos && !action) { eraserPos = null; frame(); } });
@@ -806,8 +819,10 @@ function setMenu(hidden) {
   menuHidden = hidden; showMenu();
   try { localStorage.setItem('answerpad-hide', hidden ? '1' : '0'); } catch (e) {}
 }
-$('hide').onclick = () => { setMenu(true); say('Tap Menu to bring the buttons back.'); };
-$('show').onclick = () => setMenu(false);
+// The layout changes a moment after the tap ends, so the Pencil or finger that pressed the button is
+// never left pressing on something that just moved or vanished.
+$('hide').onclick = () => { $('hide').blur(); setTimeout(() => { resetGestures(); setMenu(true); say('Tap Menu to bring the buttons back.'); }, 60); };
+$('show').onclick = () => { $('show').blur(); setTimeout(() => { resetGestures(); setMenu(false); }, 60); };
 showMenu();
 $('pensize').value = penW; $('erasersize').value = eraseR;
 function sized(kind) {
