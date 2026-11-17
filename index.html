@@ -657,7 +657,25 @@ try {
 // Answers travel through a public relay (ntfy.sh) as ordinary web traffic, so this works on
 // networks that block devices from reaching each other. They are encrypted with a key made
 // from the pairing code, which never leaves the two devices.
-const CODE_KEY = 'answerpad-laptop', RELAY = 'https://ntfy.sh/';
+const CODE_KEY = 'answerpad-laptop';
+// Two free public relays. The laptop page listens on both; the pad uses the one that worked
+// last and moves to the other when it is busy or refuses the network (it limits how many
+// connections one crowded network can have open).
+const RELAYS = ['https://ntfy.sh/', 'https://ntfy.envs.net/'];
+let goodRelay = 0;
+try { goodRelay = +localStorage.getItem('answerpad-relay') === 1 ? 1 : 0; } catch (e) {}
+// Runs `job(relay)` on each relay in turn until one works, starting with the last good one.
+async function viaRelays(job) {
+  let err;
+  for (const i of [goodRelay, 1 - goodRelay]) {
+    try {
+      const out = await job(RELAYS[i]);
+      if (i !== goodRelay) { goodRelay = i; try { localStorage.setItem('answerpad-relay', i); } catch (e) {} }
+      return out;
+    } catch (e) { err = e; }
+  }
+  throw err;
+}
 let laptopCode = null, link = null;
 try { laptopCode = localStorage.getItem(CODE_KEY); } catch (e) {}
 if (laptopCode && laptopCode.length !== 8) laptopCode = null;
@@ -674,24 +692,25 @@ async function getLink() { if (!link || link.code !== laptopCode) link = await d
 function nonce() { return Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join(''); }
 
 // Listen for the laptop's reply, publish something to it, and wait for the reply we want.
-function ask(l, publish, want, ms) {
+function ask(RELAY, l, publish, want, ms) {
   return new Promise((res, rej) => {
     const es = new EventSource(RELAY + l.topic + 'r/sse');
     let started = false;
     const done = (fn, v) => { clearTimeout(t); es.close(); fn(v); };
     const t = setTimeout(() => done(rej, new Error('noreply')), ms);
     es.onmessage = e => { try { const m = JSON.parse(e.data); if (m.event === 'message' && m.message === want) done(res); } catch (err) {} };
+    es.onerror = () => { if (!started) done(rej, new Error('refused')); };   // the relay turned us away: try the other one now
     es.onopen = () => { if (started) return; started = true; publish().catch(err => done(rej, err)); };
   });
 }
-async function post(l, body, headers) {
+async function post(RELAY, l, body, headers) {
   const r = await fetch(RELAY + l.topic, { method: 'PUT', body, headers });
   if (!r.ok) throw new Error('http' + r.status);
 }
 
 async function pingLaptop() {
   const l = await getLink(), n = nonce();
-  await ask(l, () => post(l, 'ping:' + n), 'pong:' + n, 8000);
+  await viaRelays(R => ask(R, l, () => post(R, l, 'ping:' + n), 'pong:' + n, 8000));
 }
 
 async function sendToLaptop() {
@@ -703,8 +722,7 @@ async function sendToLaptop() {
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, l.key, png));
     const body = new Uint8Array(12 + ct.length); body.set(iv); body.set(ct, 12);
-    const n = nonce();
-    await ask(l, async () => { await post(l, body, { Filename: n + '.bin' }); posted = true; }, 'got:' + n, 15000);
+    await viaRelays(R => { const n = nonce(); return ask(R, l, async () => { await post(R, l, body, { Filename: n + '.bin' }); posted = true; }, 'got:' + n, 6000); });
     say('Sent to your laptop.');
   } catch (err) {
     if (posted) say('Sent, but the laptop did not confirm. Is the receive page open there?', 6000);

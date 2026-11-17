@@ -27,7 +27,7 @@ If you chat with your AI on a laptop, the pad can send your answer there instead
 3. The Check button now says **Send**. Tap it and your answer appears on the laptop page.
 4. On the laptop, click **Copy** and press Ctrl+V in your chat.
 
-Answers travel through the free public relay [ntfy.sh](https://ntfy.sh) as ordinary web traffic, so this works on school and office Wi-Fi that stops devices from reaching each other directly. Each answer is encrypted on the iPad with a key made from the pairing code and decrypted on the laptop, so the relay only carries scrambled data. The relay keeps that scrambled copy for a few hours and then deletes it. The relay limits how many messages one network can send per day, so on a busy shared network a send can occasionally be refused; Copy still works when that happens.
+Answers travel through the free public relay [ntfy.sh](https://ntfy.sh), with [ntfy.envs.net](https://ntfy.envs.net) as a backup, as ordinary web traffic, so this works on school and office Wi-Fi that stops devices from reaching each other directly. Each answer is encrypted on the iPad with a key made from the pairing code and decrypted on the laptop, so the relay only carries scrambled data. The relay keeps that scrambled copy for a few hours and then deletes it. The relays limit how much one network can use them, so on a crowded network one of them can refuse for a while. The laptop page listens on both and the pad switches to the other one by itself; if both refuse, Copy still works.
 
 To go back to the share menu, tap **Laptop**, then **Stop sending to laptop**.
 

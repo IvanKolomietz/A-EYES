@@ -56,8 +56,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 <script>
 const $ = id => document.getElementById(id);
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // no look-alikes such as 0/O or 1/I/L
-const KEY = 'answerpad-code', MAX_BYTES = 6 * 1024 * 1024, KEEP = 8, RELAY = 'https://ntfy.sh/';
-let source = null, run = 0, baseTitle = document.title;
+const KEY = 'answerpad-code', MAX_BYTES = 6 * 1024 * 1024, KEEP = 8, RELAYS = ['https://ntfy.sh/', 'https://ntfy.envs.net/'];
+// Two free public relays. The page listens on both at once, so when one is busy or refuses a
+// crowded network, answers still arrive through the other.
+let sources = [], run = 0, baseTitle = document.title;
 const seen = new Set();
 
 function newCode() {
@@ -81,21 +83,24 @@ async function deriveLink(code) {
 
 async function start(code) {
   const mine = ++run;
-  if (source) source.close();
+  for (const es of sources) es.close(); sources = [];
   $('code').textContent = code.slice(0, 4) + '-' + code.slice(4); setState('Connecting…');
   const link = await deriveLink(code);
   if (mine !== run) return;
   store(code);
-  const reply = text => fetch(RELAY + link.topic + 'r', { method: 'POST', body: text }).catch(() => {});
-  const es = source = new EventSource(RELAY + link.topic + '/sse');
   let paired = false;   // the relay connection drops and resumes on its own; don't forget the iPad when it does
-  const showLink = () => setState(paired ? 'iPad connected' : 'Waiting for your iPad', paired);
-  es.onopen = showLink;
-  es.onerror = () => setState('Reconnecting…');
+  const up = new Set();
+  const showLink = () => up.size ? setState(paired ? 'iPad connected' : 'Waiting for your iPad', paired) : setState('Reconnecting…');
+  for (const RELAY of RELAYS) {
+  const reply = text => fetch(RELAY + link.topic + 'r', { method: 'POST', body: text }).catch(() => {});
+  const es = new EventSource(RELAY + link.topic + '/sse');
+  sources.push(es);
+  es.onopen = () => { up.add(RELAY); showLink(); };
+  es.onerror = () => { up.delete(RELAY); showLink(); };
   es.onmessage = async e => {
     let m; try { m = JSON.parse(e.data); } catch (err) { return; }
-    if (m.event !== 'message' || seen.has(m.id)) return;
-    seen.add(m.id);
+    if (m.event !== 'message' || seen.has(RELAY + m.id)) return;
+    seen.add(RELAY + m.id);
     if (m.attachment) {
       const nonce = String(m.attachment.name || '').replace(/\.bin$/, '');
       if (!/^[a-z0-9]{6,32}$/.test(nonce) || m.attachment.size > MAX_BYTES) return;
@@ -104,6 +109,7 @@ async function start(code) {
       paired = true; showLink(); reply('pong:' + m.message.slice(5));
     }
   };
+  }
 }
 
 async function accept(url, key) {
