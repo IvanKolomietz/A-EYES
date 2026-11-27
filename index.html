@@ -224,7 +224,7 @@ function grabUnder() {
     under = document.createElement('canvas'); under.width = canvas.width; under.height = canvas.height;
   }
   const g = under.getContext('2d');
-  g.globalCompositeOperation = 'copy'; g.drawImage(canvas, 0, 0);
+  g.clearRect(0, 0, under.width, under.height); g.drawImage(canvas, 0, 0);
 }
 function extend(c, p) {
   c.s.pts.push(p);
@@ -254,7 +254,7 @@ function drawStroke() {
     restore(areaOf(c, c.from, n));
     fillPieces(c, c.from, keep, false);
     const r = areaOf(c, c.from, keep);
-    if (r) under.getContext('2d').drawImage(canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+    if (r) { const g = under.getContext('2d'); g.clearRect(r.x, r.y, r.w, r.h); g.drawImage(canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h); }
     c.from = keep;
   }
   restore(areaOf(c, c.from, n));
@@ -483,6 +483,16 @@ function pt(e) {
 let lastPen = -1e9;   // when the Pencil last touched the paper
 let dropped = null;   // a stroke the system cancelled mid-line, in case the Pencil carries straight on
 let lastTap = null;   // the last quick tap of the Pencil tip, to spot a double tap
+// Is there writing within 30 screen pixels of `p`, apart from the strokes in `skip`?
+function inkNear(p, skip) {
+  const R = 30 / zoom;
+  return strokes.some(s => {
+    if (skip.includes(s)) return false;
+    const b = s.bb || (s.bb = boxOf([s]));
+    if (p.x < b.x0 - R || p.x > b.x1 + R || p.y < b.y0 - R || p.y > b.y1 + R) return false;
+    return s.pts.some(q => Math.hypot(q.x - p.x, q.y - p.y) < R);
+  });
+}
 
 // Stop Safari's own touch gestures (scroll bounce, double-tap zoom, long-press) from
 // starting under a resting palm: when one of those starts, it cuts the Pencil stroke off.
@@ -627,12 +637,13 @@ function end(e) {
     if (raw && Math.hypot(raw.x - last.x, raw.y - last.y) * zoom > 0.5) extend(c, { x: raw.x, y: raw.y, p: last.p });   // finish exactly where the Pencil lifted
     drawStroke(); c.s.shape = finalShape(c); c.s.bb = c.box;
     current = null;
-    // Two quick taps of the Pencil tip on the same spot switch to the eraser. The two dots
-    // the taps left are taken away again.
-    if (!c.touch && now - c.t0 < 250 && c.far < 6) {
-      if (lastTap && now - lastTap.t < 400 && Math.hypot(c.sx - lastTap.x, c.sy - lastTap.y) < 12 && strokes[strokes.length - 2] === lastTap.s) {
+    // Two quick taps of the Pencil tip on the same empty spot switch to the eraser. The two dots
+    // the taps left are taken away again. Taps near writing never count, so dots, decimal points
+    // and short ticks written quickly can't switch to the eraser by accident.
+    if (!c.touch && now - c.t0 < 180 && c.far < 4) {
+      if (lastTap && now - lastTap.t < 350 && Math.hypot(c.sx - lastTap.x, c.sy - lastTap.y) < 8 && strokes[strokes.length - 2] === lastTap.s && !inkNear(c.s.pts[0], [c.s, lastTap.s])) {
         history.pop(); strokes = history.pop(); lastTap = null;
-        setTool('eraser'); say('Eraser', 1200);
+        setTool('eraser'); say('Eraser: rub out, then it goes back to the pen', 2200);
       } else lastTap = { t: now, x: c.sx, y: c.sy, s: c.s };
     } else lastTap = null;
     return;
