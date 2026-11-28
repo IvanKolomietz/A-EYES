@@ -482,16 +482,19 @@ function pt(e) {
 }
 let lastPen = -1e9;   // when the Pencil last touched the paper
 let dropped = null;   // a stroke the system cancelled mid-line, in case the Pencil carries straight on
-let lastTap = null;   // the last quick tap of the Pencil tip, to spot a double tap
-// Is there writing within 30 screen pixels of `p`, apart from the strokes in `skip`?
-function inkNear(p, skip) {
-  const R = 30 / zoom;
-  return strokes.some(s => {
-    if (skip.includes(s)) return false;
-    const b = s.bb || (s.bb = boxOf([s]));
-    if (p.x < b.x0 - R || p.x > b.x1 + R || p.y < b.y0 - R || p.y > b.y1 + R) return false;
-    return s.pts.some(q => Math.hypot(q.x - p.x, q.y - p.y) < R);
-  });
+// Holding the Pencil still in one spot switches to the eraser. The dot the hold left is taken
+// away, and the same touch carries on as the eraser: rub, then lift to go back to the pen.
+const HOLD_MS = 500, HOLD_PX = 6;
+function startHold(c) {
+  setTimeout(() => {
+    if (current !== c || c.far >= HOLD_PX || tool !== 'pen') return;
+    const p = c.s.pts[0];
+    strokes = history.pop(); current = null;
+    setTool('eraser');
+    action = { id: c.id, type: 'pen', kind: 'erase', before: strokes, last: p };
+    eraserPos = p; redraw();
+    say('Eraser: rub out, lift to go back to the pen', 2200);
+  }, HOLD_MS);
 }
 
 // Stop Safari's own touch gestures (scroll bounce, double-tap zoom, long-press) from
@@ -558,6 +561,7 @@ canvas.addEventListener('pointerdown', e => {
     strokes.push(s);
     current = { id: e.pointerId, s, touch: e.pointerType === 'touch', box: { x0: p.x, y0: p.y, x1: p.x, y1: p.y }, t0: now, sx: e.clientX, sy: e.clientY, far: 0, from: 0, ink: inkColor() };
     $('hint').hidden = true;
+    if (e.pointerType !== 'touch') startHold(current);
     if (sizeHint) { sizeHint = null; redraw(); }          // redraw also draws the new stroke
     else { grabUnder(); drawStroke(); }                   // no full redraw, so a stroke starts instantly
     return;
@@ -637,15 +641,6 @@ function end(e) {
     if (raw && Math.hypot(raw.x - last.x, raw.y - last.y) * zoom > 0.5) extend(c, { x: raw.x, y: raw.y, p: last.p });   // finish exactly where the Pencil lifted
     drawStroke(); c.s.shape = finalShape(c); c.s.bb = c.box;
     current = null;
-    // Two quick taps of the Pencil tip on the same empty spot switch to the eraser. The two dots
-    // the taps left are taken away again. Taps near writing never count, so dots, decimal points
-    // and short ticks written quickly can't switch to the eraser by accident.
-    if (!c.touch && now - c.t0 < 180 && c.far < 4) {
-      if (lastTap && now - lastTap.t < 350 && Math.hypot(c.sx - lastTap.x, c.sy - lastTap.y) < 8 && strokes[strokes.length - 2] === lastTap.s && !inkNear(c.s.pts[0], [c.s, lastTap.s])) {
-        history.pop(); strokes = history.pop(); lastTap = null;
-        setTool('eraser'); say('Eraser: rub out, then it goes back to the pen', 2200);
-      } else lastTap = { t: now, x: c.sx, y: c.sy, s: c.s };
-    } else lastTap = null;
     return;
   }
   if (!action || e.pointerId !== action.id) return;
